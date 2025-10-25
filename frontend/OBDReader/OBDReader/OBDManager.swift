@@ -4,6 +4,7 @@ import SwiftUI
 import CoreBluetooth
 import Combine
 
+
 // MARK: - BLE + Networking Bridge
 class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var centralManager: CBCentralManager!
@@ -19,20 +20,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     //private let backendURL = URL(string: "http://YOUR_BACKEND_IP:8000/obd-data")!
     private var backendURL: URL!
 
-override init() {
-    super.init()
-    let env = EnvLoader.loadEnv()
-    if let urlString = env["BACKEND_URL"], let url = URL(string: urlString) {
-        backendURL = url
-        logMessage("🌐 Loaded BACKEND_URL: \(url.absoluteString)")
-    } else {
-        logMessage("⚠️ BACKEND_URL missing or invalid in .env")
-        backendURL = URL(string: "http://127.0.0.1:8000/obd-data")! // fallback
-    }
 
-    centralManager = CBCentralManager(delegate: self, queue: nil)
-    logMessage("OBDManager initialized")
-}
 
     enum ConnectionState: String {
         case idle = "Idle"
@@ -44,6 +32,14 @@ override init() {
 
     override init() {
         super.init()
+        let env = EnvLoader.loadEnv()
+        if let urlString = env["BACKEND_URL"], let url = URL(string: urlString) {
+            backendURL = url
+            logMessage("🌐 Loaded BACKEND_URL: \(url.absoluteString)")
+        } else {
+            logMessage("⚠️ BACKEND_URL missing or invalid in .env")
+            backendURL = URL(string: "http://127.0.0.1:8000/obd-data")! // fallback
+        }
         centralManager = CBCentralManager(delegate: self, queue: nil)
         logMessage("OBDManager initialized")
     }
@@ -114,20 +110,33 @@ override init() {
     }
 
     func peripheral(_ peripheral: CBPeripheral,
-                    didDiscoverCharacteristicsFor service: CBService,
-                    error: Error?) {
-        for char in service.characteristics ?? [] where char.uuid == characteristicUUID {
-            writeCharacteristic = char
-            peripheral.setNotifyValue(true, for: char)
-            logMessage("✅ Ready. Sending ATZ...")
-            sendCommand("ATZ")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                self.sendCommand("ATE0")  // disable echo
-                self.sendCommand("010C")  // request RPM
-                self.sendCommand("010D")  // request speed
-            }
+                didDiscoverCharacteristicsFor service: CBService,
+                error: Error?) {
+    for char in service.characteristics ?? [] where char.uuid == characteristicUUID {
+        writeCharacteristic = char
+        peripheral.setNotifyValue(true, for: char)
+
+        logMessage("✅ Ready. Sending ATZ...")
+        sendCommand("ATZ")
+
+        // After a short delay, send basic AT settings and request PIDs
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            self.sendCommand("ATE0")   // disable echo (recommended)
+            self.sendCommand("ATL0")   // optional: no linefeeds
+            self.sendCommand("ATS0")   // optional: no spaces
+            self.sendCommand("ATH0")   // optional: no headers
+
+            // Request Fuel Level (012F)
+            self.logMessage("⛽ Requesting Fuel Level (012F)")
+            self.sendCommand("012F")
+
+            // Existing requests (RPM and Speed)
+            self.sendCommand("010C")
+            self.sendCommand("010D")
         }
     }
+}
+
 
     func sendCommand(_ command: String) {
         guard let peripheral = obdPeripheral, let characteristic = writeCharacteristic else {
