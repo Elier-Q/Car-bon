@@ -144,9 +144,9 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private func startInitSequence() {
         cmdQueue.removeAll()
         enqueueCommands([
-            "ATZ", "ATE0", "ATL0", "ATS0", "ATH1",
-            "ATSP7", // ISO 15765-4 CAN
-            "0100"   // Check supported PIDs
+            "ATZ", "ATE0", "ATL0", "ATS1", "ATH1",
+            "ATSP7",
+            "0100"   // Check supported PIDs first
         ])
     }
 
@@ -189,17 +189,19 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             logMessage("❌ Update error: \(error.localizedDescription)")
+            return
         }
         guard let value = characteristic.value else { return }
-
+        
         let s = String(data: value, encoding: .utf8) ?? ""
+        logMessage("📥 RAW RX: \(s.replacingOccurrences(of: "\r", with: "\\r").replacingOccurrences(of: "\n", with: "\\n"))")
+
         rxBuffer += s
 
-        while rxBuffer.contains(">") {
-            let parts = rxBuffer.components(separatedBy: ">")
-            guard parts.count >= 2 else { break }
-            let frameAscii = parts[0]
-            rxBuffer = parts.dropFirst().joined(separator: ">")
+        while let promptIndex = rxBuffer.firstIndex(of: ">") {
+            let frameAscii = String(rxBuffer[..<promptIndex])
+            rxBuffer.removeSubrange(...promptIndex)
+            
             let tokens = hexTokens(from: frameAscii)
             if tokens.isEmpty {
                 advanceCommandQueueAfterPrompt()
@@ -208,39 +210,89 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
             let joined = tokens.joined(separator: " ")
             if joined.localizedCaseInsensitiveContains("NO DATA") {
-                logMessage("⚠️ ECU not ready — retrying")
+                logMessage("⚠️ NO DATA response")
                 advanceCommandQueueAfterPrompt()
-                enqueueCommands(["0100"])
                 continue
             }
 
+            // Check for 0100 response
             if contains4100(tokens) {
-                logMessage("✅ 0100 succeeded")
+                logMessage("✅ 0100 succeeded - Requesting data PIDs...")
                 advanceCommandQueueAfterPrompt()
-                enqueueCommands(["015E"]) // Request Fuel Rate
+                // Request multiple PIDs
+                enqueueCommands(["0104", "010B", "010C", "010D"])
                 continue
             }
 
-            if let quad = extract015EQuad(from: tokens) {
-                let raw = quad.joined(separator: " ")
-                logMessage("💧 RAW 015E (Fuel Rate): \(raw)")
-                sendOBDDataToAPI(hexData: raw)
+            // Check for Engine Load (0104)
+            if let data = extractPID(from: tokens, mode: "41", pid: "04") {
+                let raw = data.joined(separator: " ")
+                logMessage("📊 Engine Load: \(raw)")
                 advanceCommandQueueAfterPrompt()
                 continue
             }
+
+            // Check for Intake Manifold Pressure (010B)
+            if let data = extractPID(from: tokens, mode: "41", pid: "0B") {
+                let raw = data.joined(separator: " ")
+                logMessage("🌪️ Manifold Pressure: \(raw)")
+                advanceCommandQueueAfterPrompt()
+                continue
+            }
+
+            // Check for Engine RPM (010C)
+            if let data = extractPID(from: tokens, mode: "41", pid: "0C") {
+                let raw = data.joined(separator: " ")
+                logMessage("🏎️ Engine RPM: \(raw)")
+                advanceCommandQueueAfterPrompt()
+                continue
+            }
+
+            // Check for Vehicle Speed (010D)
+            // Check for Vehicle Speed (010D)
+            if let data = extractPID(from: tokens, mode: "41", pid: "0D") {
+                let raw = data.joined(separator: " ")
+                logMessage("🚗 Vehicle Speed: \(raw)")
+                advanceCommandQueueAfterPrompt()
+                // ❌ Removed the auto-loop for now
+                continue
+            }
+
 
             advanceCommandQueueAfterPrompt()
         }
     }
 
     private func contains4100(_ tokens: [String]) -> Bool {
-        return tokens.count >= 2 && tokens[0] == "41" && tokens[1] == "00"
+        guard tokens.count >= 2 else { return false }
+        
+        for i in 0..<(tokens.count - 1) {
+            if tokens[i] == "41" && tokens[i+1] == "00" {
+                return true
+            }
+        }
+        return false
     }
 
-    private func extract015EQuad(from tokens: [String]) -> [String]? {
-        for i in 0..<tokens.count-3 {
-            if tokens[i] == "41" && tokens[i+1] == "5E" {
-                return Array(tokens[i...i+3])
+    private func extractPID(from tokens: [String], mode: String, pid: String) -> [String]? {
+        let pidUpper = pid.uppercased()
+        let modeUpper = mode.uppercased()
+        
+        // Different PIDs return different byte lengths
+        let byteLengths: [String: Int] = [
+            "04": 3,  // Engine Load: 41 04 XX (1 data byte)
+            "0B": 3,  // MAP: 41 0B XX (1 data byte)
+            "0C": 4,  // RPM: 41 0C XX XX (2 data bytes)
+            "0D": 3   // Speed: 41 0D XX (1 data byte)
+        ]
+        
+        guard let length = byteLengths[pidUpper], tokens.count >= length else {
+            return nil
+        }
+        
+        for i in 0...(tokens.count - length) {
+            if tokens[i] == modeUpper && tokens[i+1] == pidUpper {
+                return Array(tokens[i..<(i+length)])
             }
         }
         return nil
@@ -254,7 +306,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             .map { String($0).uppercased() }
     }
 
-    // MARK: - API Communication
+    // MARK: - API Communication (not used yet)
     private func sendOBDDataToAPI(hexData: String) {
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
