@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Car-bon}/frontend",
+            "name": "Debug frontend (frontend)",
+            "program": "${workspaceFolder:Car-bon}/frontend/.build/debug/frontend",
+            "preLaunchTask": "swift: Build Debug frontend (frontend)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Car-bon}/frontend",
+            "name": "Release frontend (frontend)",
+            "program": "${workspaceFolder:Car-bon}/frontend/.build/release/frontend",
+            "preLaunchTask": "swift: Build Release frontend (frontend)"
+        }
+    ]
+}
