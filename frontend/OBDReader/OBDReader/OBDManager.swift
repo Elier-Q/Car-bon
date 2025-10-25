@@ -18,7 +18,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var bluetoothEnabled: Bool = false
 
     //private let backendURL = URL(string: "http://YOUR_BACKEND_IP:8000/obd-data")!
-    private var backendURL: URL!
+    
 
 
 
@@ -29,9 +29,12 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         case connected = "Connected ✅"
         case failed = "Connection Failed ❌"
     }
-
+    
+    var backendURL: URL!
+    
     override init() {
         super.init()
+        
         let env = EnvLoader.loadEnv()
         if let urlString = env["BACKEND_URL"], let url = URL(string: urlString) {
             backendURL = url
@@ -95,7 +98,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         logMessage("✅ Connected to \(peripheral.name ?? "OBD")")
         connectionState = .connected
         peripheral.delegate = self
-        peripheral.discoverServices([serviceUUID])
+        peripheral.discoverServices(nil)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -104,50 +107,87 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        for service in peripheral.services ?? [] {
-            peripheral.discoverCharacteristics([characteristicUUID], for: service)
-        }
-    }
-
-    func peripheral(_ peripheral: CBPeripheral,
-                didDiscoverCharacteristicsFor service: CBService,
-                error: Error?) {
-    for char in service.characteristics ?? [] where char.uuid == characteristicUUID {
-        writeCharacteristic = char
-        peripheral.setNotifyValue(true, for: char)
-
-        logMessage("✅ Ready. Sending ATZ...")
-        sendCommand("ATZ")
-
-        // After a short delay, send basic AT settings and request PIDs
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            self.sendCommand("ATE0")   // disable echo (recommended)
-            self.sendCommand("ATL0")   // optional: no linefeeds
-            self.sendCommand("ATS0")   // optional: no spaces
-            self.sendCommand("ATH0")   // optional: no headers
-
-            // Request Fuel Level (012F)
-            self.logMessage("⛽ Requesting Fuel Level (012F)")
-            self.sendCommand("012F")
-
-            // Existing requests (RPM and Speed)
-            self.sendCommand("010C")
-            self.sendCommand("010D")
-        }
-    }
-}
-
-
-    func sendCommand(_ command: String) {
-        guard let peripheral = obdPeripheral, let characteristic = writeCharacteristic else {
+        if let error = error {
+            logMessage("❌ didDiscoverServices error: \(error.localizedDescription)")
             return
         }
-        let data = (command + "\r").data(using: .utf8)!
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
-        logMessage("→ \(command)")
+        guard let services = peripheral.services, !services.isEmpty else {
+            logMessage("⚠️ didDiscoverServices: no services found")
+            return
+        }
+        logMessage("🧭 Services count: \(services.count)")
+        for service in services {
+            logMessage("🧭 Service: \(service.uuid.uuidString)")
+            // Discover ALL characteristics for each service
+            peripheral.discoverCharacteristics(nil, for: service)
+        }
     }
 
+    
+    private var notifyCharacteristic: CBCharacteristic?
+    private var didStartInit = false
+
+    func peripheral(_ peripheral: CBPeripheral,
+                    didDiscoverCharacteristicsFor service: CBService,
+                    error: Error?) {
+        if let error = error {
+            logMessage("❌ didDiscoverCharacteristicsFor \(service.uuid.uuidString) error: \(error.localizedDescription)")
+            return
+        }
+        guard let chars = service.characteristics, !chars.isEmpty else {
+            logMessage("⚠️ No characteristics for service \(service.uuid.uuidString)")
+            return
+        }
+
+        for char in chars {
+            logMessage("🔎 Char \(char.uuid.uuidString) props: \(char.properties) on service \(service.uuid.uuidString)")
+
+            // Pick write char
+            if writeCharacteristic == nil,
+               (char.properties.contains(.write) || char.properties.contains(.writeWithoutResponse)) {
+                writeCharacteristic = char
+                logMessage("✍️ Selected write char: \(char.uuid.uuidString)")
+            }
+
+            // Pick notify char
+            if notifyCharacteristic == nil,
+               (char.properties.contains(.notify) || char.properties.contains(.indicate)) {
+                notifyCharacteristic = char
+                peripheral.setNotifyValue(true, for: char)
+                logMessage("🔔 Enabled notifications on \(char.uuid.uuidString)")
+            }
+        }
+
+        // Start ELM init only once we have both
+        if !didStartInit, writeCharacteristic != nil, notifyCharacteristic != nil {
+            didStartInit = true
+            logMessage("✅ Ready. Sending ATZ...")
+            sendCommand("ATZ")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                self.sendCommand("ATE0")
+                self.sendCommand("ATL0")
+                self.sendCommand("ATS0")
+                self.sendCommand("ATH0")
+                self.logMessage("⛽ Requesting Fuel Level (012F)")
+                self.sendCommand("012F")
+                self.sendCommand("010C")
+                self.sendCommand("010D")
+            }
+        }
+    }
+
+    func sendCommand(_ command: String) {
+        guard let peripheral = obdPeripheral, let characteristic = writeCharacteristic else { return }
+        guard let data = (command + "\r").data(using: .utf8) else { return }
+        let useWWR = characteristic.properties.contains(.writeWithoutResponse) && !characteristic.properties.contains(.write)
+        let type: CBCharacteristicWriteType = useWWR ? .withoutResponse : .withResponse
+        peripheral.writeValue(data, for: characteristic, type: type)
+        logMessage("→ \(command) [\(type == .withResponse ? "withResponse" : "withoutResponse")]")
+    }
+
+
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        logMessage("🔔 didUpdateValueFor \(characteristic.uuid)")
         guard let value = characteristic.value,
               let response = String(data: value, encoding: .utf8)
         else { return }

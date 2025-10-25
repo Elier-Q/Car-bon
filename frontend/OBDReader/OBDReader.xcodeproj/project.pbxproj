@@ -6,8 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		DADC944C2EAD48D1004A0520 /* .env in Resources */ = {isa = PBXBuildFile; fileRef = DADC944B2EAD48CC004A0520 /* .env */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		DADC94132EAC9BC4004A0520 /* OBDReader.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OBDReader.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DADC944B2EAD48CC004A0520 /* .env */ = {isa = PBXFileReference; lastKnownFileType = text; path = .env; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -34,6 +39,7 @@
 			children = (
 				DADC94152EAC9BC4004A0520 /* OBDReader */,
 				DADC94142EAC9BC4004A0520 /* Products */,
+				DADC944B2EAD48CC004A0520 /* .env */,
 			);
 			sourceTree = "<group>";
 		};
@@ -109,6 +115,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DADC944C2EAD48D1004A0520 /* .env in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
