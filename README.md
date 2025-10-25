@@ -5,3 +5,4 @@ Dependancies required to install:
     Backend (pip install):
         uvicorn
         bleak
+        pydantic

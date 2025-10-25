@@ -1,17 +1,21 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+from pydantic import BaseModel
 from datetime import datetime
 from obdparse import parse_obd_response
 from carbcalc import calculate_from_maf
 
 app = FastAPI(title="Car-bon Backend API")
 
+# ✅ Define a request body model
+class OBDRequest(BaseModel):
+    response: str
+
 @app.post("/obd-data")
-async def receive_obd_data(request: Request):
+async def receive_obd_data(data: OBDRequest):
     """
     Receives BLE → HTTP OBD-II data.
     """
-    data = await request.json()
-    response = data.get("response", "").strip()
+    response = data.response.strip()
     print(f"[{datetime.now().isoformat()}] Received: {response}")
 
     parsed = parse_obd_response(response)
