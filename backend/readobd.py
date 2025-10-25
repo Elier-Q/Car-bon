@@ -1,4 +1,4 @@
-# obd_ble_reader.py
+# readobd.py
 import asyncio
 from bleak import BleakClient, BleakScanner
 

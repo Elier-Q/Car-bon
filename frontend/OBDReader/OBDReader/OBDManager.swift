@@ -1,3 +1,5 @@
+//OBDManager.swift
+
 import SwiftUI
 import CoreBluetooth
 import Combine
@@ -14,7 +16,23 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var connectionState: ConnectionState = .idle
     @Published var bluetoothEnabled: Bool = false
 
-    private let backendURL = URL(string: "http://YOUR_BACKEND_IP:8000/obd-data")!
+    //private let backendURL = URL(string: "http://YOUR_BACKEND_IP:8000/obd-data")!
+    private var backendURL: URL!
+
+override init() {
+    super.init()
+    let env = EnvLoader.loadEnv()
+    if let urlString = env["BACKEND_URL"], let url = URL(string: urlString) {
+        backendURL = url
+        logMessage("🌐 Loaded BACKEND_URL: \(url.absoluteString)")
+    } else {
+        logMessage("⚠️ BACKEND_URL missing or invalid in .env")
+        backendURL = URL(string: "http://127.0.0.1:8000/obd-data")! // fallback
+    }
+
+    centralManager = CBCentralManager(delegate: self, queue: nil)
+    logMessage("OBDManager initialized")
+}
 
     enum ConnectionState: String {
         case idle = "Idle"

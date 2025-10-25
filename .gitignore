@@ -1,0 +1,45 @@
+# ---- Python / FastAPI ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+.env
+.env.*
+*.sqlite3
+venv/
+.venv/
+.envrc
+.DS_Store
+
+# ---- Node or build artifacts (if any) ----
+dist/
+build/
+*.log
+
+# ---- Swift / Xcode ----
+.DS_Store
+build/
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcuserdatad
+*.xcuserstate
+*.swp
+*.lock
+
+# ---- Secrets / Config ----
+.env
+.env.local
+.env.development
+.env.production
+*.local
+*.secret
+*.key
+*.pem
+
+# ---- Temporary ----
+.idea/
+.vscode/
+*.bak
+*.tmp

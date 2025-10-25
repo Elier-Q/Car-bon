@@ -1,3 +1,5 @@
+# carbcalc.py
+
 from typing import Optional, Dict, List
 from fastapi import FastAPI, Request
 
@@ -32,7 +34,7 @@ FUEL_PROPERTIES = {
 # ------------------------------
 # Core Functions
 # ------------------------------
-
+@app.post("/calculate-from-maf")
 def calculate_from_maf(
     maf_gps: float,
     fuel_type: str = "gasoline"
@@ -69,7 +71,7 @@ def calculate_from_maf(
         "co2_kg_per_hour": co2_kg_per_hour
     }
 
-@app.post("/calculate-from-maf")
+
 def calculate_from_fuel_rate(
     fuel_rate_Lph: float,
     fuel_type: str = "gasoline"
