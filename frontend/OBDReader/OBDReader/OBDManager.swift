@@ -1,4 +1,4 @@
-import SwiftUI
+import Foundation
 import CoreBluetooth
 import Combine
 
@@ -6,7 +6,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var centralManager: CBCentralManager!
     private var obdPeripheral: CBPeripheral?
 
-    // FFF0 UART-style service used by many ELM327 clones
+    // Common UART-style service (used by many ELM327 clones)
     private let fff0ServiceUUID = CBUUID(string: "FFF0")
     private let fff1NotifyUUID  = CBUUID(string: "FFF1")  // TX (notify)
     private let fff2WriteUUID   = CBUUID(string: "FFF2")  // RX (write)
@@ -35,15 +35,10 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     override init() {
         super.init()
-        let env = EnvLoader.loadEnv()
-        if let urlString = env["BACKEND_URL"], let url = URL(string: urlString) {
+        if let url = URL(string: "http://127.0.0.1:8000/obd-data") {
             backendURL = url
-            logMessage("🌐 Loaded BACKEND_URL: \(url.absoluteString)")
-        } else {
-            logMessage("⚠️ BACKEND_URL missing or invalid in .env")
-            backendURL = URL(string: "http://127.0.0.1:8000/obd-data")! // fallback
+            logMessage("🌐 Using backend URL: \(url.absoluteString)")
         }
-        logMessage("OBDManager initialized")
         centralManager = CBCentralManager(delegate: self, queue: nil)
     }
 
@@ -66,14 +61,12 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
 
+    // MARK: - Bluetooth Delegates
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
             bluetoothEnabled = true
             logMessage("✅ Bluetooth is ON")
-        case .unauthorized:
-            bluetoothEnabled = false
-            logMessage("⚠️ Bluetooth permissions not granted. Please enable in Settings.")
         default:
             bluetoothEnabled = false
             logMessage("⚠️ Bluetooth unavailable or OFF")
@@ -82,7 +75,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     func centralManager(_ central: CBCentralManager,
                         didDiscover peripheral: CBPeripheral,
-                        advertisementData: [String: Any],
+                        advertisementData: [String : Any],
                         rssi RSSI: NSNumber) {
         if peripheral.name?.uppercased().contains("VEEPEAK") == true {
             logMessage("🔗 Found Veepak: \(peripheral.name ?? "Unknown")")
@@ -100,22 +93,13 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         peripheral.discoverServices([fff0ServiceUUID])
     }
 
-    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        connectionState = .failed
-        logMessage("❌ Failed to connect: \(error?.localizedDescription ?? "unknown error")")
-    }
-
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error = error {
-            logMessage("❌ didDiscoverServices error: \(error.localizedDescription)")
+            logMessage("❌ Service discovery error: \(error.localizedDescription)")
             return
         }
-        guard let services = peripheral.services, !services.isEmpty else {
-            logMessage("⚠️ didDiscoverServices: no services found")
-            return
-        }
+        guard let services = peripheral.services else { return }
         for service in services {
-            logMessage("🧭 Service: \(service.uuid.uuidString)")
             if service.uuid == fff0ServiceUUID {
                 peripheral.discoverCharacteristics([fff1NotifyUUID, fff2WriteUUID], for: service)
             }
@@ -126,28 +110,15 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                     didDiscoverCharacteristicsFor service: CBService,
                     error: Error?) {
         if let error = error {
-            logMessage("❌ didDiscoverCharacteristicsFor \(service.uuid.uuidString) error: \(error.localizedDescription)")
+            logMessage("❌ Characteristic discovery error: \(error.localizedDescription)")
             return
         }
-        guard let chars = service.characteristics, !chars.isEmpty else {
-            logMessage("⚠️ No characteristics for service \(service.uuid.uuidString)")
-            return
-        }
-
+        guard let chars = service.characteristics else { return }
         for char in chars {
-            logMessage("🔎 Char \(char.uuid.uuidString) props: \(char.properties) on service \(service.uuid.uuidString)")
-            if char.uuid == fff2WriteUUID {
-                writeCharacteristic = char
-                logMessage("✍️ Using FFF2 as write")
-            }
+            if char.uuid == fff2WriteUUID { writeCharacteristic = char }
             if char.uuid == fff1NotifyUUID {
                 notifyCharacteristic = char
-                if !char.isNotifying {
-                    peripheral.setNotifyValue(true, for: char)
-                    logMessage("🔔 Using FFF1 as notify (enabled)")
-                } else {
-                    logMessage("🔔 Using FFF1 as notify (already enabled)")
-                }
+                peripheral.setNotifyValue(true, for: char)
             }
         }
     }
@@ -156,35 +127,26 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                     didUpdateNotificationStateFor characteristic: CBCharacteristic,
                     error: Error?) {
         if let error = error {
-            logMessage("❌ didUpdateNotificationStateFor \(characteristic.uuid.uuidString): \(error.localizedDescription)")
+            logMessage("❌ Notification state error: \(error.localizedDescription)")
             return
         }
-        logMessage("🔔 Notification state updated for \(characteristic.uuid.uuidString): \(characteristic.isNotifying)")
 
-        if characteristic.uuid == fff1NotifyUUID,
-           characteristic.isNotifying,
-           writeCharacteristic != nil,
-           !didStartInit {
+        if characteristic.uuid == fff1NotifyUUID, characteristic.isNotifying, !didStartInit {
             didStartInit = true
             rxBuffer.removeAll()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self.startInitATSP7()
+                self.startInitSequence()
             }
         }
     }
 
-    // MARK: - Init sequence (force ISO15765-4 CAN)
-    private func startInitATSP7() {
+    // MARK: - Init sequence
+    private func startInitSequence() {
         cmdQueue.removeAll()
         enqueueCommands([
-            "ATI",
-            "ATZ",
-            "ATE0",
-            "ATL0",
-            "ATS0",
-            "ATH1",   // headers ON
-            "ATSP7",  // ISO 15765-4 CAN (29bit, 500kbps)
-            "0100"    // confirm supported PIDs
+            "ATZ", "ATE0", "ATL0", "ATS0", "ATH1",
+            "ATSP7", // ISO 15765-4 CAN
+            "0100"   // Check supported PIDs
         ])
     }
 
@@ -196,8 +158,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private func advanceCommandQueue() {
         guard !isSending, !cmdQueue.isEmpty else { return }
         isSending = true
-        let next = cmdQueue.removeFirst()
-        sendCommand(next)
+        sendCommand(cmdQueue.removeFirst())
     }
 
     private func advanceCommandQueueAfterPrompt() {
@@ -209,140 +170,91 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private func sendCommand(_ command: String) {
         guard let peripheral = obdPeripheral, let ch = writeCharacteristic else { return }
         guard let data = (command + "\r").data(using: .utf8) else { return }
-
         peripheral.writeValue(data, for: ch, type: .withoutResponse)
-        logMessage("→ \(command) [FFF0 path]")
-        
+        logMessage("→ \(command)")
+
         currentTimeoutTask?.cancel()
         let task = DispatchWorkItem {
             if self.isSending {
-                self.logMessage("⏱️ Timeout after 5s - no prompt received")
+                self.logMessage("⏱️ Timeout: No response")
                 self.isSending = false
                 self.advanceCommandQueue()
             }
         }
         currentTimeoutTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: task)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: task)
     }
 
-    // MARK: - Receive and parse ECU responses
+    // MARK: - Receive & Parse
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            logMessage("❌ didUpdateValueFor \(characteristic.uuid) error: \(error.localizedDescription)")
+            logMessage("❌ Update error: \(error.localizedDescription)")
         }
         guard let value = characteristic.value else { return }
 
-        let s = String(data: value, encoding: .utf8)
-        if let s = s, !s.isEmpty {
-            logMessage("← ascii [\(characteristic.uuid.uuidString)]: \(s.replacingOccurrences(of: "\r", with: "\\r").replacingOccurrences(of: "\n", with: "\\n"))")
-            rxBuffer += s
-        } else {
-            let hex = value.map { String(format: "%02X", $0) }.joined(separator: " ")
-            logMessage("← hex   [\(characteristic.uuid.uuidString)]: \(hex)")
-        }
+        let s = String(data: value, encoding: .utf8) ?? ""
+        rxBuffer += s
 
         while rxBuffer.contains(">") {
-            let components = rxBuffer.components(separatedBy: ">")
-            guard components.count >= 2 else {
-                rxBuffer = ""
-                break
-            }
-            let frameAscii = components[0]
-            rxBuffer = components.dropFirst().joined(separator: ">")
+            let parts = rxBuffer.components(separatedBy: ">")
+            guard parts.count >= 2 else { break }
+            let frameAscii = parts[0]
+            rxBuffer = parts.dropFirst().joined(separator: ">")
             let tokens = hexTokens(from: frameAscii)
             if tokens.isEmpty {
                 advanceCommandQueueAfterPrompt()
                 continue
             }
 
-            // handle ECU not ready
             let joined = tokens.joined(separator: " ")
-            if joined.localizedCaseInsensitiveContains("SEARCHING")
-                || joined.localizedCaseInsensitiveContains("NO DATA")
-                || joined.localizedCaseInsensitiveContains("STOPPED") {
-                logMessage("⚠️ ECU not responding yet: \(joined) — retrying 0100")
+            if joined.localizedCaseInsensitiveContains("NO DATA") {
+                logMessage("⚠️ ECU not ready — retrying")
                 advanceCommandQueueAfterPrompt()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    self.enqueueCommands(["0100"])
-                }
+                enqueueCommands(["0100"])
                 continue
             }
 
-            // handle 0100 success
             if contains4100(tokens) {
                 logMessage("✅ 0100 succeeded")
                 advanceCommandQueueAfterPrompt()
-                enqueueCommands(["ATDP", "ATH0", "0110"]) // request MAF
+                enqueueCommands(["015E"]) // Request Fuel Rate
                 continue
             }
 
-            // handle 0110 (MAF)
-            if let mafQuad = extract0110Quad(from: tokens) {
-                let raw = mafQuad.joined(separator: " ")
-                logMessage("🌬️ RAW 0110 (MAF): \(raw)")
+            if let quad = extract015EQuad(from: tokens) {
+                let raw = quad.joined(separator: " ")
+                logMessage("💧 RAW 015E (Fuel Rate): \(raw)")
                 sendOBDDataToAPI(hexData: raw)
                 advanceCommandQueueAfterPrompt()
                 continue
             }
 
-            logMessage("← tokens: \(tokens.joined(separator: " "))")
             advanceCommandQueueAfterPrompt()
         }
     }
 
     private func contains4100(_ tokens: [String]) -> Bool {
-        if tokens.count >= 2, tokens[0] == "41", tokens[1] == "00" { return true }
-        return tokens.contains { $0.contains("4100") }
+        return tokens.count >= 2 && tokens[0] == "41" && tokens[1] == "00"
     }
 
-    private func extract0110Quad(from tokens: [String]) -> [String]? {
-        if tokens.count >= 4 {
-            for i in 0...(tokens.count - 4) {
-                if tokens[i] == "41" && tokens[i + 1] == "10" {
-                    return [tokens[i], tokens[i + 1], tokens[i + 2], tokens[i + 3]]
-                }
-            }
-        }
-        for t in tokens {
-            if let range = t.range(of: "4110") {
-                let after = String(t[range.upperBound...])
-                let A = String(after.prefix(2))
-                let B = String(after.dropFirst(2).prefix(2))
-                if A.count == 2, B.count == 2 {
-                    return ["41", "10", A, B]
-                }
+    private func extract015EQuad(from tokens: [String]) -> [String]? {
+        for i in 0..<tokens.count-3 {
+            if tokens[i] == "41" && tokens[i+1] == "5E" {
+                return Array(tokens[i...i+3])
             }
         }
         return nil
     }
 
     private func hexTokens(from string: String) -> [String] {
-        let cleaned = string
-            .replacingOccurrences(of: ">", with: " ")
+        return string
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\t", with: " ")
-            .replacingOccurrences(of: "  ", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .uppercased()
-
-        if cleaned.isEmpty { return [] }
-
-        if cleaned.contains(" ") {
-            return cleaned.split(whereSeparator: { $0.isWhitespace }).map { String($0) }
-        } else {
-            var tokens: [String] = []
-            var remaining = cleaned
-            while !remaining.isEmpty {
-                let chunk = String(remaining.prefix(2))
-                tokens.append(chunk)
-                remaining = String(remaining.dropFirst(min(2, remaining.count)))
-            }
-            return tokens
-        }
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { String($0).uppercased() }
     }
 
-    // MARK: - Send to backend
+    // MARK: - API Communication
     private func sendOBDDataToAPI(hexData: String) {
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
@@ -372,19 +284,20 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
 
             if httpResponse.statusCode == 200 {
-                self.logMessage("✅ Data sent to API successfully")
+                self.logMessage("✅ Sent to backend OK")
                 if let data = data,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     self.logMessage("📥 API Response: \(json)")
                 }
             } else {
-                self.logMessage("⚠️ API returned status \(httpResponse.statusCode)")
+                self.logMessage("⚠️ Backend returned status \(httpResponse.statusCode)")
             }
         }
 
         task.resume()
     }
 
+    // MARK: - Logging
     private func logMessage(_ msg: String) {
         DispatchQueue.main.async {
             self.log.append(msg)

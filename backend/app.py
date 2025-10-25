@@ -2,11 +2,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
 from obdparse import parse_obd_response
-from carbcalc import calculate_from_maf
+from carbcalc import calculate_from_fuel_rate
 
 app = FastAPI(title="Car-bon Backend API")
 
-# Expect only hex_data (and optionally timestamp)
 class OBDPayload(BaseModel):
     hex_data: str
     timestamp: str | None = None
@@ -17,21 +16,19 @@ async def receive_obd_data(payload: OBDPayload):
     Receives BLE → HTTP OBD-II data from Swift OBDManager.
     Example payload:
     {
-        "hex_data": "41 2F 7F",
+        "hex_data": "41 5E 02 1C",
         "timestamp": "2025-10-25T17:30:00Z"
     }
     """
     print(f"\n[{datetime.now().isoformat()}] 🚗 Received Raw={payload.hex_data}")
 
-    # Parse the hex OBD-II response into structured info
     parsed = parse_obd_response(payload.hex_data)
     print(f"🧩 Parsed OBD data: {parsed}")
 
-    # CO₂ estimation only if MAF PID is detected (0110)
     emissions = None
-    if parsed and parsed.get("pid") == "0110":
-        maf_val = parsed["value"]
-        emissions = calculate_from_maf(maf_val)
+    if parsed and parsed.get("pid") == "015E":
+        fuel_rate = parsed["value"]
+        emissions = calculate_from_fuel_rate(fuel_rate)
         parsed.update(emissions)
         print(f"🌍 CO₂ Estimation: {emissions}")
 
