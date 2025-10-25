@@ -36,21 +36,12 @@ struct ContentView: View {
                 .padding(.bottom)
 
             ScrollView {
-                ForEach(manager.log, id: \.self) { line in
-                    Text(line)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(Array(manager.log.enumerated()), id: \.offset) { index, logLine in
+                    Text(logLine)
                 }
             }
         }
         .padding()
-        .alert(isPresented: $showBluetoothAlert) {
-            Alert(
-                title: Text("Bluetooth Required"),
-                message: Text("Please enable Bluetooth and grant permissions in Settings."),
-                dismissButton: .default(Text("OK"))
-            )
-        }
         .onAppear {
             if !manager.bluetoothEnabled {
                 showBluetoothAlert = true
