@@ -294,9 +294,14 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             if let triplet = extract012FTriplet(from: tokens) {
                 let raw = triplet.joined(separator: " ")
                 logMessage("⛽ RAW 012F: \(raw)")
+                
+                // Send to backend API
+                sendOBDDataToAPI(hexData: raw, pid: "012F")
+                
                 advanceCommandQueueAfterPrompt()
                 continue
             }
+
             
             // Default: log and advance for any other response
             logMessage("← tokens: \(tokens.joined(separator: " "))")
@@ -370,6 +375,53 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             return tokens
         }
     }
+    
+    // MARK: - API Communication
+    private func sendOBDDataToAPI(hexData: String, pid: String) {
+        var request = URLRequest(url: backendURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let payload: [String: Any] = [
+            "pid": pid,
+            "hex_data": hexData,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            logMessage("❌ Failed to encode JSON: \(error)")
+            return
+        }
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                self.logMessage("❌ API Error: \(error.localizedDescription)")
+                return
+            }
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                self.logMessage("❌ Invalid response")
+                return
+            }
+            
+            if httpResponse.statusCode == 200 {
+                self.logMessage("✅ Data sent to API successfully")
+                
+                // Parse response if needed
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    self.logMessage("📥 API Response: \(json)")
+                }
+            } else {
+                self.logMessage("⚠️ API returned status \(httpResponse.statusCode)")
+            }
+        }
+        
+        task.resume()
+    }
+
 
 
 
