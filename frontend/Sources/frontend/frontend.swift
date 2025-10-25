@@ -9,7 +9,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private let serviceUUID = CBUUID(string: "FFE0")
     private let characteristicUUID = CBUUID(string: "FFE1")
 
-    @Published var log: [String] = []
+    // logging disabled per user request
     private let backendURL = URL(string: "http://YOUR_BACKEND_IP:8000/obd-data")!  // change this!
 
     override init() {
@@ -19,10 +19,10 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
-            logMessage("Scanning for VEEPEAK OBDII...")
+            // logging removed
             central.scanForPeripherals(withServices: nil, options: nil)
         } else {
-            logMessage("Bluetooth not available.")
+            // logging removed
         }
     }
 
@@ -31,7 +31,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         advertisementData: [String: Any], rssi RSSI: NSNumber
     ) {
         if peripheral.name?.uppercased().contains("VEEPEAK") == true {
-            logMessage("Found Veepak: \(peripheral.name ?? "Unknown")")
             obdPeripheral = peripheral
             central.stopScan()
             central.connect(peripheral, options: nil)
@@ -39,7 +38,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        logMessage("Connected to \(peripheral.name ?? "OBD")")
+        // logging removed
         peripheral.delegate = self
         peripheral.discoverServices([serviceUUID])
     }
@@ -56,12 +55,12 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         for char in service.characteristics ?? [] where char.uuid == characteristicUUID {
             writeCharacteristic = char
             peripheral.setNotifyValue(true, for: char)
-            logMessage("Ready. Sending ATZ...")
             sendCommand("ATZ")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                self.sendCommand("ATE0")  // disable echo
-                self.sendCommand("010C")  // request RPM
-                self.sendCommand("010D")  // request speed
+            // schedule the initial follow-up commands after 2 seconds
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.sendCommand("ATE0")  // disable echo
+                self?.sendCommand("010C")  // request RPM
+                self?.sendCommand("010D")  // request speed
             }
         }
     }
@@ -72,7 +71,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
         let data = (command + "\r").data(using: .utf8)!
         peripheral.writeValue(data, for: characteristic, type: .withResponse)
-        logMessage("→ \(command)")
     }
 
     func peripheral(
@@ -82,7 +80,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         guard let value = characteristic.value,
             let response = String(data: value, encoding: .utf8)
         else { return }
-        logMessage("← \(response.trimmingCharacters(in: .whitespacesAndNewlines))")
         sendToBackend(response)
     }
 
@@ -97,12 +94,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         URLSession.shared.dataTask(with: request).resume()
     }
 
-    private func logMessage(_ msg: String) {
-        DispatchQueue.main.async {
-            self.log.append(msg)
-            print(msg)
-        }
-    }
+    // logMessage removed
 }
 
 // MARK: - Minimal UI
@@ -115,11 +107,9 @@ struct ContentView: View {
                 .font(.title2)
                 .padding(.bottom)
             ScrollView {
-                ForEach(manager.log, id: \.self) { line in
-                    Text(line)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                Text("Logging disabled")
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding()

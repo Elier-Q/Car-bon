@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch frontend (LLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/.build/arm64-apple-macosx/debug/frontend",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "stopOnEntry": false,
+      "terminal": "integrated"
+    },
+    {
+      "name": "Run frontend (no debug)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/.build/arm64-apple-macosx/debug/frontend",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "stopOnEntry": false,
+      "terminal": "integrated",
+      "preLaunchTask": "swift: build"
+    }
+  ]
+}
