@@ -1,13 +1,10 @@
 # carbcalc.py
 
 from typing import Optional, Dict, List
-from fastapi import FastAPI, Request
 
 # ------------------------------
 # Constants
 # ------------------------------
-app = FastAPI()
-
 FUEL_PROPERTIES = {
     "gasoline": {
         "afr": 14.7,              # Air-Fuel Ratio
@@ -25,8 +22,8 @@ FUEL_PROPERTIES = {
         "co2_factor": 1.909
     },
     "electric": {
-        # grid emission factor depends on region (U.S. avg ~0.4 kg CO₂/kWh)
-        "grid_factor": 0.4
+        # Grid emission factor (U.S. average)
+        "grid_factor": 0.4        # kg CO₂ / kWh
     }
 }
 
@@ -34,18 +31,14 @@ FUEL_PROPERTIES = {
 # ------------------------------
 # Core Functions
 # ------------------------------
-@app.post("/calculate-from-maf")
-def calculate_from_maf(
-    maf_gps: float,
-    fuel_type: str = "gasoline"
-) -> Dict[str, float]:
+def calculate_from_maf(maf_gps: float, fuel_type: str = "gasoline") -> Dict[str, float]:
     """
     Estimate instantaneous fuel consumption and CO₂ emissions
-    using Mass Air Flow (MAF).
+    from MAF (Mass Air Flow) readings.
 
     Args:
         maf_gps: Mass Air Flow in grams per second
-        fuel_type: Type of fuel ("gasoline", "diesel", "ethanol")
+        fuel_type: Fuel type ("gasoline", "diesel", "ethanol")
 
     Returns:
         dict with fuel_L_per_hour and co2_kg_per_hour
@@ -72,10 +65,7 @@ def calculate_from_maf(
     }
 
 
-def calculate_from_fuel_rate(
-    fuel_rate_Lph: float,
-    fuel_type: str = "gasoline"
-) -> Dict[str, float]:
+def calculate_from_fuel_rate(fuel_rate_Lph: float, fuel_type: str = "gasoline") -> Dict[str, float]:
     """
     Calculate CO₂ directly from a known fuel rate (L/h).
     """
@@ -90,16 +80,9 @@ def calculate_from_fuel_rate(
     }
 
 
-def calculate_electric(
-    energy_kWh: float,
-    region_factor: Optional[float] = None
-) -> Dict[str, float]:
+def calculate_electric(energy_kWh: float, region_factor: Optional[float] = None) -> Dict[str, float]:
     """
-    Estimate CO₂ for electric vehicles using grid emission factor.
-
-    Args:
-        energy_kWh: energy consumed
-        region_factor: override grid factor (kg CO₂ per kWh)
+    Estimate CO₂ emissions for electric vehicles using grid factor.
     """
     factor = region_factor or FUEL_PROPERTIES["electric"]["grid_factor"]
     co2_kg = energy_kWh * factor
@@ -109,20 +92,17 @@ def calculate_electric(
 # ------------------------------
 # Aggregation Utility
 # ------------------------------
-
-def summarize_trip(
-    samples: List[Dict],
-    fuel_type: str = "gasoline"
-) -> Dict[str, float]:
+def summarize_trip(samples: List[Dict], fuel_type: str = "gasoline") -> Dict[str, float]:
     """
-    Summarize an entire trip’s CO₂ output and fuel usage.
+    Summarize total CO₂ output and fuel usage across a trip.
 
-    Each sample in `samples` should contain either:
+    Each sample in `samples` should include either:
       - "maf_gps", OR
-      - "fuel_rate_Lph", and optionally "speed_kph"
+      - "fuel_rate_Lph"
+      (optionally "speed_kph" and "dt")
 
     Returns:
-        Total CO₂ (kg), fuel used (L), average speed, total time (s)
+        Total CO₂ (kg), fuel used (L), average speed (km/h), total time (s)
     """
     total_fuel_L = 0.0
     total_co2_kg = 0.0
@@ -140,7 +120,7 @@ def summarize_trip(
         else:
             continue
 
-        # Convert L/h → L/s
+        # Convert L/h → L/s, then scale by dt
         fuel_L = calc["fuel_L_per_hour"] / 3600.0 * dt
         co2_kg = calc["co2_kg_per_hour"] / 3600.0 * dt
 
@@ -165,9 +145,7 @@ def summarize_trip(
 # ------------------------------
 # Example Usage
 # ------------------------------
-
 if __name__ == "__main__":
-    # Example data (3 samples, 1 second apart)
     data_samples = [
         {"maf_gps": 10.0, "speed_kph": 50, "dt": 1},
         {"maf_gps": 12.0, "speed_kph": 60, "dt": 1},

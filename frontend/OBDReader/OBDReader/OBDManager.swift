@@ -6,13 +6,13 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var centralManager: CBCentralManager!
     private var obdPeripheral: CBPeripheral?
 
-    // Force FFF0 path
+    // FFF0 UART-style service used by many ELM327 clones
     private let fff0ServiceUUID = CBUUID(string: "FFF0")
     private let fff1NotifyUUID  = CBUUID(string: "FFF1")  // TX (notify)
     private let fff2WriteUUID   = CBUUID(string: "FFF2")  // RX (write)
 
-    private var writeCharacteristic: CBCharacteristic?    // FFF2
-    private var notifyCharacteristic: CBCharacteristic?   // FFF1
+    private var writeCharacteristic: CBCharacteristic?
+    private var notifyCharacteristic: CBCharacteristic?
 
     @Published var log: [String] = []
     @Published var connectionState: ConnectionState = .idle
@@ -32,7 +32,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var isSending = false
     private var currentTimeoutTask: DispatchWorkItem?
     private var backendURL: URL!
-    
+
     override init() {
         super.init()
         let env = EnvLoader.loadEnv()
@@ -136,7 +136,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
         for char in chars {
             logMessage("🔎 Char \(char.uuid.uuidString) props: \(char.properties) on service \(service.uuid.uuidString)")
-
             if char.uuid == fff2WriteUUID {
                 writeCharacteristic = char
                 logMessage("✍️ Using FFF2 as write")
@@ -174,7 +173,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
 
-    // MARK: - Init (lock to ATSP7) then 0100 → 012F
+    // MARK: - Init sequence (force ISO15765-4 CAN)
     private func startInitATSP7() {
         cmdQueue.removeAll()
         enqueueCommands([
@@ -183,11 +182,10 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             "ATE0",
             "ATL0",
             "ATS0",
-            "ATH1",   // headers ON to observe ECU traffic while probing
-            "ATSP7",  // force ISO 15765-4 CAN (29 bit, 500 kbps)
+            "ATH1",   // headers ON
+            "ATSP7",  // ISO 15765-4 CAN (29bit, 500kbps)
             "0100"    // confirm supported PIDs
         ])
-        // After 0100 succeeds (41 00 …), code will send ATDP, ATH0, then 012F
     }
 
     private func enqueueCommands(_ cmds: [String]) {
@@ -203,7 +201,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     private func advanceCommandQueueAfterPrompt() {
-        currentTimeoutTask?.cancel()  // Prompt arrived, cancel timeout
+        currentTimeoutTask?.cancel()
         isSending = false
         advanceCommandQueue()
     }
@@ -212,12 +210,10 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         guard let peripheral = obdPeripheral, let ch = writeCharacteristic else { return }
         guard let data = (command + "\r").data(using: .utf8) else { return }
 
-        // Force withoutResponse for FFF0 UART
         peripheral.writeValue(data, for: ch, type: .withoutResponse)
-        logMessage("→ \(command) [path=FFF0, using=withoutResponse]")
+        logMessage("→ \(command) [FFF0 path]")
         
-        // Set timeout as safety net
-        currentTimeoutTask?.cancel()  // Cancel previous
+        currentTimeoutTask?.cancel()
         let task = DispatchWorkItem {
             if self.isSending {
                 self.logMessage("⏱️ Timeout after 5s - no prompt received")
@@ -229,8 +225,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: task)
     }
 
-    // MARK: - Receive and parse (header-aware)
-    // MARK: - Receive and parse (header-aware)
+    // MARK: - Receive and parse ECU responses
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             logMessage("❌ didUpdateValueFor \(characteristic.uuid) error: \(error.localizedDescription)")
@@ -246,31 +241,22 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             logMessage("← hex   [\(characteristic.uuid.uuidString)]: \(hex)")
         }
 
-        // Process all prompts in buffer - SIMPLEST SAFE METHOD
         while rxBuffer.contains(">") {
-            // Split on first prompt
             let components = rxBuffer.components(separatedBy: ">")
-            
             guard components.count >= 2 else {
                 rxBuffer = ""
                 break
             }
-            
             let frameAscii = components[0]
-            // Keep everything after the first prompt
             rxBuffer = components.dropFirst().joined(separator: ">")
-
             let tokens = hexTokens(from: frameAscii)
-            
-            // Empty response - just advance
             if tokens.isEmpty {
                 advanceCommandQueueAfterPrompt()
                 continue
             }
 
+            // handle ECU not ready
             let joined = tokens.joined(separator: " ")
-            
-            // Handle SEARCHING/NO DATA - retry 0100
             if joined.localizedCaseInsensitiveContains("SEARCHING")
                 || joined.localizedCaseInsensitiveContains("NO DATA")
                 || joined.localizedCaseInsensitiveContains("STOPPED") {
@@ -282,72 +268,53 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 continue
             }
 
-            // Handle 0100 success
+            // handle 0100 success
             if contains4100(tokens) {
                 logMessage("✅ 0100 succeeded")
                 advanceCommandQueueAfterPrompt()
-                enqueueCommands(["ATDP", "ATH0", "012F"])
+                enqueueCommands(["ATDP", "ATH0", "0110"]) // request MAF
                 continue
             }
 
-            // Handle 012F
-            if let triplet = extract012FTriplet(from: tokens) {
-                let raw = triplet.joined(separator: " ")
-                logMessage("⛽ RAW 012F: \(raw)")
-                
-                // Send to backend API
-                sendOBDDataToAPI(hexData: raw, pid: "012F")
-                
+            // handle 0110 (MAF)
+            if let mafQuad = extract0110Quad(from: tokens) {
+                let raw = mafQuad.joined(separator: " ")
+                logMessage("🌬️ RAW 0110 (MAF): \(raw)")
+                sendOBDDataToAPI(hexData: raw)
                 advanceCommandQueueAfterPrompt()
                 continue
             }
 
-            
-            // Default: log and advance for any other response
             logMessage("← tokens: \(tokens.joined(separator: " "))")
             advanceCommandQueueAfterPrompt()
         }
     }
 
-
-    // If ATH1 (headers on) the adapter may output long concatenated frames.
-    // This detects "41 00" even inside those.
     private func contains4100(_ tokens: [String]) -> Bool {
         if tokens.count >= 2, tokens[0] == "41", tokens[1] == "00" { return true }
         return tokens.contains { $0.contains("4100") }
     }
 
-    // Extract "41 2F A" even if frame is headered/concatenated
-    private func extract012FTriplet(from tokens: [String]) -> [String]? {
-        // Clean separated tokens case
-        if tokens.count >= 3 {
-            for i in 0...(tokens.count - 3) {
-                if tokens[i] == "41" && tokens[i + 1] == "2F" {
-                    return [tokens[i], tokens[i + 1], tokens[i + 2]]
+    private func extract0110Quad(from tokens: [String]) -> [String]? {
+        if tokens.count >= 4 {
+            for i in 0...(tokens.count - 4) {
+                if tokens[i] == "41" && tokens[i + 1] == "10" {
+                    return [tokens[i], tokens[i + 1], tokens[i + 2], tokens[i + 3]]
                 }
             }
         }
-        
-        // Headered case: search within each token
         for t in tokens {
-            // Find "412F" and extract next 2 chars - COMPLETELY SAFE
-            if let foundRange = t.range(of: "412F") {
-                let fullString = t
-                let searchEnd = foundRange.upperBound
-                let distance = fullString.distance(from: fullString.startIndex, to: searchEnd)
-                
-                // Use dropFirst to avoid range subscripting
-                let afterMatch = String(fullString.dropFirst(distance))
-                let A = String(afterMatch.prefix(2))
-                
-                if A.count == 2 {
-                    return ["41", "2F", A]
+            if let range = t.range(of: "4110") {
+                let after = String(t[range.upperBound...])
+                let A = String(after.prefix(2))
+                let B = String(after.dropFirst(2).prefix(2))
+                if A.count == 2, B.count == 2 {
+                    return ["41", "10", A, B]
                 }
             }
         }
         return nil
     }
-
 
     private func hexTokens(from string: String) -> [String] {
         let cleaned = string
@@ -364,7 +331,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         if cleaned.contains(" ") {
             return cleaned.split(whereSeparator: { $0.isWhitespace }).map { String($0) }
         } else {
-            // COMPLETELY SAFE: No ranges at all
             var tokens: [String] = []
             var remaining = cleaned
             while !remaining.isEmpty {
@@ -375,41 +341,38 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             return tokens
         }
     }
-    
-    // MARK: - API Communication
-    private func sendOBDDataToAPI(hexData: String, pid: String) {
+
+    // MARK: - Send to backend
+    private func sendOBDDataToAPI(hexData: String) {
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+
         let payload: [String: Any] = [
-            "pid": pid,
             "hex_data": hexData,
             "timestamp": ISO8601DateFormatter().string(from: Date())
         ]
-        
+
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         } catch {
             logMessage("❌ Failed to encode JSON: \(error)")
             return
         }
-        
+
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 self.logMessage("❌ API Error: \(error.localizedDescription)")
                 return
             }
-            
+
             guard let httpResponse = response as? HTTPURLResponse else {
                 self.logMessage("❌ Invalid response")
                 return
             }
-            
+
             if httpResponse.statusCode == 200 {
                 self.logMessage("✅ Data sent to API successfully")
-                
-                // Parse response if needed
                 if let data = data,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     self.logMessage("📥 API Response: \(json)")
@@ -418,12 +381,9 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 self.logMessage("⚠️ API returned status \(httpResponse.statusCode)")
             }
         }
-        
+
         task.resume()
     }
-
-
-
 
     private func logMessage(_ msg: String) {
         DispatchQueue.main.async {
