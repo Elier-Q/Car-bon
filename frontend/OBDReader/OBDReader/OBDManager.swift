@@ -31,9 +31,18 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var cmdQueue: [String] = []
     private var isSending = false
     private var currentTimeoutTask: DispatchWorkItem?
-
+    private var backendURL: URL!
+    
     override init() {
         super.init()
+        let env = EnvLoader.loadEnv()
+        if let urlString = env["BACKEND_URL"], let url = URL(string: urlString) {
+            backendURL = url
+            logMessage("🌐 Loaded BACKEND_URL: \(url.absoluteString)")
+        } else {
+            logMessage("⚠️ BACKEND_URL missing or invalid in .env")
+            backendURL = URL(string: "http://127.0.0.1:8000/obd-data")! // fallback
+        }
         logMessage("OBDManager initialized")
         centralManager = CBCentralManager(delegate: self, queue: nil)
     }
