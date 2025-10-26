@@ -3,13 +3,14 @@ import CoreBluetooth
 import Combine
 
 class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    
+    // MARK: - Bluetooth
     private var centralManager: CBCentralManager!
     private var obdPeripheral: CBPeripheral?
 
-    // Common UART-style service (used by many ELM327 clones)
     private let fff0ServiceUUID = CBUUID(string: "FFF0")
-    private let fff1NotifyUUID  = CBUUID(string: "FFF1")  // TX (notify)
-    private let fff2WriteUUID   = CBUUID(string: "FFF2")  // RX (write)
+    private let fff1NotifyUUID  = CBUUID(string: "FFF1")
+    private let fff2WriteUUID   = CBUUID(string: "FFF2")
 
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
@@ -17,18 +18,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var log: [String] = []
     @Published var connectionState: ConnectionState = .idle
     @Published var bluetoothEnabled: Bool = false
-    
-    // Speed tracking properties
-    var speedSamples: [Double] = []
-    private var maxSpeedSamples = 60  // Keep last 60 samples
-    @Published var averageSpeed: Double = 0.0
-    @Published var currentSpeed: Double = 0.0
-    @Published var isCollectingData: Bool = false
-    
-    // Manual speed input
-    @Published var useManualSpeed: Bool = false
-    @Published var manualAverageSpeed: Double = 0.0
-    @Published var displayedAverageSpeed: Double = 0.0
 
     enum ConnectionState: String {
         case idle = "Idle"
@@ -38,12 +27,29 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         case failed = "Connection Failed ❌"
     }
 
+    // MARK: - Speed & PID tracking
+    @Published var speedSamples: [Double] = []
+    private var maxSpeedSamples = 60
+    @Published var averageSpeed: Double = 0.0
+    @Published var currentSpeed: Double = 0.0
+    @Published var isCollectingData = false
+
+    @Published var useManualSpeed = false
+    @Published var manualAverageSpeed: Double = 0.0
+    @Published var displayedAverageSpeed: Double = 0.0
+
+    // Latest hex per PID
+    @Published var lastRPMHex: String = ""
+    @Published var lastLoadHex: String = ""
+    @Published var lastManifoldHex: String = ""
+
+    // MARK: - Internal
     private var didStartInit = false
     private var rxBuffer = ""
     private var cmdQueue: [String] = []
     private var isSending = false
     private var currentTimeoutTask: DispatchWorkItem?
-    private var backendURL: URL!
+    private var backendURL: URL?
 
     override init() {
         super.init()
@@ -54,6 +60,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         centralManager = CBCentralManager(delegate: self, queue: nil)
     }
 
+    // MARK: - Connection
     func startConnection() {
         guard bluetoothEnabled else {
             logMessage("⚠️ Bluetooth is off or permission not granted.")
@@ -63,7 +70,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         connectionState = .scanning
         logMessage("🔍 Scanning for VEEPEAK OBDII...")
         centralManager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
-
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
             if self.connectionState == .scanning {
                 self.centralManager.stopScan()
@@ -75,20 +81,12 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     // MARK: - Bluetooth Delegates
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        switch central.state {
-        case .poweredOn:
-            bluetoothEnabled = true
-            logMessage("✅ Bluetooth is ON")
-        default:
-            bluetoothEnabled = false
-            logMessage("⚠️ Bluetooth unavailable or OFF")
-        }
+        bluetoothEnabled = (central.state == .poweredOn)
+        logMessage(bluetoothEnabled ? "✅ Bluetooth is ON" : "⚠️ Bluetooth unavailable or OFF")
     }
 
-    func centralManager(_ central: CBCentralManager,
-                        didDiscover peripheral: CBPeripheral,
-                        advertisementData: [String : Any],
-                        rssi RSSI: NSNumber) {
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
+                        advertisementData: [String : Any], rssi RSSI: NSNumber) {
         if peripheral.name?.uppercased().contains("VEEPEAK") == true {
             logMessage("🔗 Found Veepak: \(peripheral.name ?? "Unknown")")
             obdPeripheral = peripheral
@@ -111,15 +109,12 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             return
         }
         guard let services = peripheral.services else { return }
-        for service in services {
-            if service.uuid == fff0ServiceUUID {
-                peripheral.discoverCharacteristics([fff1NotifyUUID, fff2WriteUUID], for: service)
-            }
+        for service in services where service.uuid == fff0ServiceUUID {
+            peripheral.discoverCharacteristics([fff1NotifyUUID, fff2WriteUUID], for: service)
         }
     }
 
-    func peripheral(_ peripheral: CBPeripheral,
-                    didDiscoverCharacteristicsFor service: CBService,
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
                     error: Error?) {
         if let error = error {
             logMessage("❌ Characteristic discovery error: \(error.localizedDescription)")
@@ -135,8 +130,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
 
-    func peripheral(_ peripheral: CBPeripheral,
-                    didUpdateNotificationStateFor characteristic: CBCharacteristic,
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
                     error: Error?) {
         if let error = error {
             logMessage("❌ Notification state error: \(error.localizedDescription)")
@@ -152,14 +146,10 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
 
-    // MARK: - Init sequence
+    // MARK: - Command Queue
     private func startInitSequence() {
         cmdQueue.removeAll()
-        enqueueCommands([
-            "ATZ", "ATE0", "ATL0", "ATS1", "ATH1",
-            "ATSP7",
-            "0100"
-        ])
+        enqueueCommands(["ATZ", "ATE0", "ATL0", "ATS1", "ATH1", "ATSP7", "0100"])
     }
 
     private func enqueueCommands(_ cmds: [String]) {
@@ -199,141 +189,64 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     // MARK: - Receive & Parse
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        if let error = error {
-            logMessage("❌ Update error: \(error.localizedDescription)")
-            return
-        }
+        if let error = error { logMessage("❌ Update error: \(error.localizedDescription)"); return }
         guard let value = characteristic.value else { return }
-        
+
         let s = String(data: value, encoding: .utf8) ?? ""
         logMessage("📥 RAW RX: \(s.replacingOccurrences(of: "\r", with: "\\r").replacingOccurrences(of: "\n", with: "\\n"))")
 
         rxBuffer += s
-
         while let promptIndex = rxBuffer.firstIndex(of: ">") {
             let frameAscii = String(rxBuffer[..<promptIndex])
             rxBuffer.removeSubrange(...promptIndex)
-            
+
             let tokens = hexTokens(from: frameAscii)
-            if tokens.isEmpty {
-                advanceCommandQueueAfterPrompt()
-                continue
-            }
-
+            if tokens.isEmpty { advanceCommandQueueAfterPrompt(); continue }
             let joined = tokens.joined(separator: " ")
-            if joined.localizedCaseInsensitiveContains("NO DATA") {
-                logMessage("⚠️ NO DATA response")
-                advanceCommandQueueAfterPrompt()
-                continue
-            }
+            if joined.localizedCaseInsensitiveContains("NO DATA") { advanceCommandQueueAfterPrompt(); continue }
 
-            // Check for 0100 response
-            if contains4100(tokens) {
-                logMessage("✅ 0100 succeeded - Requesting data PIDs...")
-                advanceCommandQueueAfterPrompt()
-                enqueueCommands(["0104", "010B", "010C", "010D"])
-                continue
-            }
-
-            // Check for Engine Load (0104)
-            if let data = extractPID(from: tokens, mode: "41", pid: "04") {
-                let raw = data.joined(separator: " ")
-                logMessage("📊 Engine Load: \(raw)")
-                advanceCommandQueueAfterPrompt()
-                continue
-            }
-
-            // Check for Intake Manifold Pressure (010B)
-            if let data = extractPID(from: tokens, mode: "41", pid: "0B") {
-                let raw = data.joined(separator: " ")
-                logMessage("🌪️ Manifold Pressure: \(raw)")
-                advanceCommandQueueAfterPrompt()
-                continue
-            }
-
-            // Check for Engine RPM (010C)
+            // RPM 0C
             if let data = extractPID(from: tokens, mode: "41", pid: "0C") {
-                let raw = data.joined(separator: " ")
-                logMessage("🏎️ Engine RPM: \(raw)")
+                lastRPMHex = data.joined(separator: " ")
+                logMessage("🏎️ Engine RPM: \(lastRPMHex)")
                 advanceCommandQueueAfterPrompt()
                 continue
             }
 
-            // Check for Vehicle Speed (010D)
+            // Engine Load 04
+            if let data = extractPID(from: tokens, mode: "41", pid: "04") {
+                lastLoadHex = data.joined(separator: " ")
+                logMessage("📊 Engine Load: \(lastLoadHex)")
+                advanceCommandQueueAfterPrompt()
+                continue
+            }
+
+            // Intake Manifold 0B
+            if let data = extractPID(from: tokens, mode: "41", pid: "0B") {
+                lastManifoldHex = data.joined(separator: " ")
+                logMessage("🌪️ Manifold Pressure: \(lastManifoldHex)")
+                advanceCommandQueueAfterPrompt()
+                continue
+            }
+
+            // Speed 0D
             if let data = extractPID(from: tokens, mode: "41", pid: "0D") {
-                let raw = data.joined(separator: " ")
-                
-                // Parse speed from hex
-                if data.count >= 3, let speedHex = Int(data[2], radix: 16) {
+                if let speedHex = Int(data[2], radix: 16) {
                     let speed = Double(speedHex)
                     currentSpeed = speed
-                    
-                    // Add sample
                     speedSamples.append(speed)
-                    if speedSamples.count > maxSpeedSamples {
-                        speedSamples.removeFirst()
-                    }
-                    
-                    // Calculate average
-                    if !speedSamples.isEmpty {
-                        averageSpeed = speedSamples.reduce(0, +) / Double(speedSamples.count)
-                    }
-                    
+                    if speedSamples.count > maxSpeedSamples { speedSamples.removeFirst() }
+                    averageSpeed = speedSamples.reduce(0, +) / Double(speedSamples.count)
                     updateDisplayedAverage()
-                    
                     logMessage("🚗 Speed: \(String(format: "%.1f", speed)) km/h | Avg: \(String(format: "%.1f", displayedAverageSpeed)) km/h (\(speedSamples.count) samples)")
-                } else {
-                    logMessage("🚗 Vehicle Speed: \(raw)")
                 }
-                
                 advanceCommandQueueAfterPrompt()
-                
-                // Request again if collecting data
-                if isCollectingData {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        self.enqueueCommands(["010D"])
-                    }
-                }
-                
+                if isCollectingData { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.enqueueCommands(["010D"]) } }
                 continue
             }
 
             advanceCommandQueueAfterPrompt()
         }
-    }
-
-    private func contains4100(_ tokens: [String]) -> Bool {
-        guard tokens.count >= 2 else { return false }
-        
-        for i in 0..<(tokens.count - 1) {
-            if tokens[i] == "41" && tokens[i+1] == "00" {
-                return true
-            }
-        }
-        return false
-    }
-
-    private func extractPID(from tokens: [String], mode: String, pid: String) -> [String]? {
-        let pidUpper = pid.uppercased()
-        let modeUpper = mode.uppercased()
-        
-        let byteLengths: [String: Int] = [
-            "04": 3,  // Engine Load: 41 04 XX (1 data byte)
-            "0B": 3,  // MAP: 41 0B XX (1 data byte)
-            "0C": 4,  // RPM: 41 0C XX XX (2 data bytes)
-            "0D": 3   // Speed: 41 0D XX (1 data byte)
-        ]
-        
-        guard let length = byteLengths[pidUpper], tokens.count >= length else {
-            return nil
-        }
-        
-        for i in 0...(tokens.count - length) {
-            if tokens[i] == modeUpper && tokens[i+1] == pidUpper {
-                return Array(tokens[i..<(i+length)])
-            }
-        }
-        return nil
     }
 
     private func hexTokens(from string: String) -> [String] {
@@ -343,25 +256,36 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             .split(whereSeparator: { $0.isWhitespace })
             .map { String($0).uppercased() }
     }
-    
+
+    private func extractPID(from tokens: [String], mode: String, pid: String) -> [String]? {
+        let byteLengths: [String: Int] = ["04":3,"0B":3,"0C":4,"0D":3]
+        guard let length = byteLengths[pid.uppercased()], tokens.count >= length else { return nil }
+        for i in 0...(tokens.count - length) {
+            if tokens[i].uppercased() == mode.uppercased() && tokens[i+1].uppercased() == pid.uppercased() {
+                return Array(tokens[i..<(i+length)])
+            }
+        }
+        return nil
+    }
+
     // MARK: - Speed Management
     private func updateDisplayedAverage() {
         displayedAverageSpeed = useManualSpeed ? manualAverageSpeed : averageSpeed
     }
-    
+
     func setManualAverageSpeed(_ speed: Double) {
         manualAverageSpeed = speed
         useManualSpeed = true
         updateDisplayedAverage()
         logMessage("✏️ Manual average speed set to \(String(format: "%.1f", speed)) km/h")
     }
-    
+
     func toggleSpeedMode(manual: Bool) {
         useManualSpeed = manual
         updateDisplayedAverage()
         logMessage(manual ? "📝 Using manual speed input" : "📊 Using calculated speed")
     }
-    
+
     func startCollectingSpeed() {
         isCollectingData = true
         speedSamples.removeAll()
@@ -369,12 +293,12 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         logMessage("▶️ Started collecting speed samples")
         enqueueCommands(["010D"])
     }
-    
+
     func stopCollectingSpeed() {
         isCollectingData = false
         logMessage("⏸️ Stopped collecting (collected \(speedSamples.count) samples)")
     }
-    
+
     func resetAverageSpeed() {
         speedSamples.removeAll()
         averageSpeed = 0.0
@@ -383,55 +307,34 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     // MARK: - API Communication
-    private func sendOBDDataToAPI(hexData: String) {
+    func sendAllOBDData() {
+        var payload: [String: Any] = [
+            "rpm_hex": lastRPMHex,
+            "engine_load_hex": lastLoadHex,
+            "intake_manifold_hex": lastManifoldHex,
+            "speed_kmh": displayedAverageSpeed,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ]
+        guard let backendURL = backendURL else { logMessage("❌ Backend URL not set"); return }
+
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        do { request.httpBody = try JSONSerialization.data(withJSONObject: payload) } 
+        catch { logMessage("❌ Failed to encode JSON: \(error)"); return }
 
-        let payload: [String: Any] = [
-            "hex_data": hexData,
-            "average_speed_kmh": displayedAverageSpeed,
-            "speed_source": useManualSpeed ? "manual" : "calculated",
-            "timestamp": ISO8601DateFormatter().string(from: Date())
-        ]
-
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        } catch {
-            logMessage("❌ Failed to encode JSON: \(error)")
-            return
-        }
-
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                self.logMessage("❌ API Error: \(error.localizedDescription)")
-                return
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error { self.logMessage("❌ API Error: \(error.localizedDescription)"); return }
+            guard let httpResponse = response as? HTTPURLResponse else { self.logMessage("❌ Invalid response"); return }
+            self.logMessage(httpResponse.statusCode == 200 ? "✅ Sent OBD + speed to backend OK" : "⚠️ Backend returned status \(httpResponse.statusCode)")
+            if let data = data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                self.logMessage("📥 API Response: \(json)")
             }
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                self.logMessage("❌ Invalid response")
-                return
-            }
-
-            if httpResponse.statusCode == 200 {
-                self.logMessage("✅ Sent to backend OK")
-                if let data = data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    self.logMessage("📥 API Response: \(json)")
-                }
-            } else {
-                self.logMessage("⚠️ Backend returned status \(httpResponse.statusCode)")
-            }
-        }
-
-        task.resume()
+        }.resume()
     }
 
     // MARK: - Logging
     private func logMessage(_ msg: String) {
-        DispatchQueue.main.async {
-            self.log.append(msg)
-            print(msg)
-        }
+        DispatchQueue.main.async { self.log.append(msg); print(msg) }
     }
 }
