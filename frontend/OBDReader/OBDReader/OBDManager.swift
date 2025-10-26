@@ -53,7 +53,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     override init() {
         super.init()
-        if let url = URL(string: "http://127.0.0.1:8000/obd-data") {
+        if let url = URL(string: "http://172.20.10.2:8000/obd-data") {
             backendURL = url
             logMessage("🌐 Using backend URL: \(url.absoluteString)")
         }
@@ -203,7 +203,19 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             let tokens = hexTokens(from: frameAscii)
             if tokens.isEmpty { advanceCommandQueueAfterPrompt(); continue }
             let joined = tokens.joined(separator: " ")
-            if joined.localizedCaseInsensitiveContains("NO DATA") { advanceCommandQueueAfterPrompt(); continue }
+            if joined.localizedCaseInsensitiveContains("NO DATA") {
+                logMessage("⚠️ NO DATA")
+                advanceCommandQueueAfterPrompt()
+                continue
+            }
+
+            // ✅ CHECK FOR 0100 RESPONSE FIRST
+            if contains4100(tokens) {
+                logMessage("✅ 0100 succeeded - Requesting data PIDs...")
+                advanceCommandQueueAfterPrompt()
+                enqueueCommands(["0104", "010B", "010C", "010D"])
+                continue
+            }
 
             // RPM 0C
             if let data = extractPID(from: tokens, mode: "41", pid: "0C") {
@@ -231,17 +243,23 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
             // Speed 0D
             if let data = extractPID(from: tokens, mode: "41", pid: "0D") {
-                if let speedHex = Int(data[2], radix: 16) {
+                if data.count >= 3, let speedHex = Int(data[2], radix: 16) {
                     let speed = Double(speedHex)
                     currentSpeed = speed
                     speedSamples.append(speed)
                     if speedSamples.count > maxSpeedSamples { speedSamples.removeFirst() }
-                    averageSpeed = speedSamples.reduce(0, +) / Double(speedSamples.count)
+                    if !speedSamples.isEmpty {
+                        averageSpeed = speedSamples.reduce(0, +) / Double(speedSamples.count)
+                    }
                     updateDisplayedAverage()
                     logMessage("🚗 Speed: \(String(format: "%.1f", speed)) km/h | Avg: \(String(format: "%.1f", displayedAverageSpeed)) km/h (\(speedSamples.count) samples)")
                 }
                 advanceCommandQueueAfterPrompt()
-                if isCollectingData { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.enqueueCommands(["010D"]) } }
+                if isCollectingData {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.enqueueCommands(["010D"])
+                    }
+                }
                 continue
             }
 
@@ -266,6 +284,18 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
         }
         return nil
+    }
+
+    // ✅ HELPER FUNCTION FOR 0100 CHECK
+    private func contains4100(_ tokens: [String]) -> Bool {
+        guard tokens.count >= 2 else { return false }
+        
+        for i in 0..<(tokens.count - 1) {
+            if tokens[i] == "41" && tokens[i+1] == "00" {
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Speed Management
@@ -308,33 +338,81 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     // MARK: - API Communication
     func sendAllOBDData() {
-        var payload: [String: Any] = [
+        let payload: [String: Any] = [
             "rpm_hex": lastRPMHex,
             "engine_load_hex": lastLoadHex,
             "intake_manifold_hex": lastManifoldHex,
             "speed_kmh": displayedAverageSpeed,
+            "speed_source": useManualSpeed ? "manual" : "calculated",
             "timestamp": ISO8601DateFormatter().string(from: Date())
         ]
-        guard let backendURL = backendURL else { logMessage("❌ Backend URL not set"); return }
+        
+        sendDataToBackend(payload: payload, successMessage: "✅ Sent OBD + speed to backend OK")
+    }
+
+    // ✅ NEW FUNCTION FOR MANUAL SPEED
+    func sendManualSpeedData() {
+        guard useManualSpeed else {
+            logMessage("⚠️ Manual speed mode not enabled")
+            return
+        }
+        
+        let payload: [String: Any] = [
+            "rpm_hex": lastRPMHex,
+            "engine_load_hex": lastLoadHex,
+            "intake_manifold_hex": lastManifoldHex,
+            "speed_kmh": manualAverageSpeed,
+            "speed_source": "manual",
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ]
+        
+        sendDataToBackend(
+            payload: payload,
+            successMessage: "✅ Sent manual speed (\(String(format: "%.1f", manualAverageSpeed)) km/h) to backend"
+        )
+    }
+
+    // Shared function to send data to backend
+    private func sendDataToBackend(payload: [String: Any], successMessage: String) {
+        guard let backendURL = backendURL else {
+            logMessage("❌ Backend URL not set")
+            return
+        }
 
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        do { request.httpBody = try JSONSerialization.data(withJSONObject: payload) } 
-        catch { logMessage("❌ Failed to encode JSON: \(error)"); return }
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            logMessage("❌ Failed to encode JSON: \(error)")
+            return
+        }
 
         URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error { self.logMessage("❌ API Error: \(error.localizedDescription)"); return }
-            guard let httpResponse = response as? HTTPURLResponse else { self.logMessage("❌ Invalid response"); return }
-            self.logMessage(httpResponse.statusCode == 200 ? "✅ Sent OBD + speed to backend OK" : "⚠️ Backend returned status \(httpResponse.statusCode)")
-            if let data = data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let error = error {
+                self.logMessage("❌ API Error: \(error.localizedDescription)")
+                return
+            }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                self.logMessage("❌ Invalid response")
+                return
+            }
+            
+            self.logMessage(httpResponse.statusCode == 200 ?
+                successMessage :
+                "⚠️ Backend returned status \(httpResponse.statusCode)")
+            
+            if let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 self.logMessage("📥 API Response: \(json)")
             }
         }.resume()
     }
 
     // MARK: - Logging
-    private func logMessage(_ msg: String) {
+    func logMessage(_ msg: String) {
         DispatchQueue.main.async { self.log.append(msg); print(msg) }
     }
 }
