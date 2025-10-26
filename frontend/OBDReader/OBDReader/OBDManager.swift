@@ -38,10 +38,30 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var manualAverageSpeed: Double = 0.0
     @Published var displayedAverageSpeed: Double = 0.0
 
-    // Latest hex per PID
+    // Latest hex per PID (raw, unparsed)
     @Published var lastRPMHex: String = ""
     @Published var lastLoadHex: String = ""
     @Published var lastManifoldHex: String = ""
+    
+    // Parsed values from backend
+    @Published var parsedRPM: Double = 0.0
+    @Published var parsedEngineLoad: Double = -1.0
+    @Published var parsedManifoldPressure: Double = 0.0
+    @Published var emissions: [String: Any]?
+
+    @Published var fuelLph: Double = 0.0
+    @Published var co2KgPerHr: Double = 0.0
+
+    // Track if we have all data
+    private var hasAllPIDs: Bool {
+        return !lastRPMHex.isEmpty && !lastLoadHex.isEmpty && !lastManifoldHex.isEmpty
+    }
+    
+    @Published var autoParse: Bool = true
+    
+    // ✅ FIXED: Separate timers for different purposes
+    private var manualSpeedTimer: Timer?
+    private var autoParseTimer: Timer?  // ✅ NEW: For debouncing auto-parse
 
     // MARK: - Internal
     private var didStartInit = false
@@ -209,7 +229,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 continue
             }
 
-            // ✅ CHECK FOR 0100 RESPONSE FIRST
+            // Check for 0100 response first
             if contains4100(tokens) {
                 logMessage("✅ 0100 succeeded - Requesting data PIDs...")
                 advanceCommandQueueAfterPrompt()
@@ -220,24 +240,27 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             // RPM 0C
             if let data = extractPID(from: tokens, mode: "41", pid: "0C") {
                 lastRPMHex = data.joined(separator: " ")
-                logMessage("🏎️ Engine RPM: \(lastRPMHex)")
+                logMessage("🏎️ Engine RPM hex: \(lastRPMHex)")
                 advanceCommandQueueAfterPrompt()
+                checkAndSendForParsing()
                 continue
             }
 
             // Engine Load 04
             if let data = extractPID(from: tokens, mode: "41", pid: "04") {
                 lastLoadHex = data.joined(separator: " ")
-                logMessage("📊 Engine Load: \(lastLoadHex)")
+                logMessage("📊 Engine Load hex: \(lastLoadHex)")
                 advanceCommandQueueAfterPrompt()
+                checkAndSendForParsing()
                 continue
             }
 
             // Intake Manifold 0B
             if let data = extractPID(from: tokens, mode: "41", pid: "0B") {
                 lastManifoldHex = data.joined(separator: " ")
-                logMessage("🌪️ Manifold Pressure: \(lastManifoldHex)")
+                logMessage("🌪️ Manifold Pressure hex: \(lastManifoldHex)")
                 advanceCommandQueueAfterPrompt()
+                checkAndSendForParsing()
                 continue
             }
 
@@ -252,9 +275,11 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                         averageSpeed = speedSamples.reduce(0, +) / Double(speedSamples.count)
                     }
                     updateDisplayedAverage()
-                    logMessage("🚗 Speed: \(String(format: "%.1f", speed)) km/h | Avg: \(String(format: "%.1f", displayedAverageSpeed)) km/h (\(speedSamples.count) samples)")
+                    logMessage("🚗 Speed: \(String(format: "%.1f", speed)) km/h")
                 }
                 advanceCommandQueueAfterPrompt()
+                checkAndSendForParsing()
+                
                 if isCollectingData {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                         self.enqueueCommands(["010D"])
@@ -286,7 +311,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         return nil
     }
 
-    // ✅ HELPER FUNCTION FOR 0100 CHECK
     private func contains4100(_ tokens: [String]) -> Bool {
         guard tokens.count >= 2 else { return false }
         
@@ -298,22 +322,66 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         return false
     }
 
+    // ✅ FIXED: Proper debouncing for auto-parse
+    private func checkAndSendForParsing() {
+        guard autoParse else { return }
+        guard hasAllPIDs else { return }
+        
+        // Cancel any pending parse request
+        autoParseTimer?.invalidate()
+        
+        // Schedule new parse request with debouncing
+        autoParseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            if self.hasAllPIDs {
+                self.logMessage("🔄 Auto-parsing updated OBD data...")
+                self.sendForLiveParsing()
+            }
+        }
+    }
+
     // MARK: - Speed Management
     private func updateDisplayedAverage() {
         displayedAverageSpeed = useManualSpeed ? manualAverageSpeed : averageSpeed
     }
 
+    /// ✅ UNIFIED: Single function to set manual speed with auto-parsing
     func setManualAverageSpeed(_ speed: Double) {
         manualAverageSpeed = speed
         useManualSpeed = true
         updateDisplayedAverage()
         logMessage("✏️ Manual average speed set to \(String(format: "%.1f", speed)) km/h")
+        
+        // Cancel any pending manual speed parse
+        manualSpeedTimer?.invalidate()
+        
+        // Schedule new parse request (debounced)
+        manualSpeedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            if self.hasAllPIDs && speed > 0 {
+                self.logMessage("🔄 Calculating emissions with speed: \(String(format: "%.1f", speed)) km/h")
+                self.sendForLiveParsing(successMessage: "✅ Updated with manual speed", silent: false)
+            } else if !self.hasAllPIDs {
+                self.logMessage("⚠️ Need OBD data first - connect to vehicle")
+            }
+        }
+    }
+    
+    /// ✅ SIMPLIFIED: Just calls setManualAverageSpeed
+    func triggerManualSpeedUpdate(_ speed: Double) {
+        setManualAverageSpeed(speed)
     }
 
     func toggleSpeedMode(manual: Bool) {
         useManualSpeed = manual
         updateDisplayedAverage()
         logMessage(manual ? "📝 Using manual speed input" : "📊 Using calculated speed")
+        
+        // ✅ NEW: Trigger re-calculation when toggling modes
+        if hasAllPIDs {
+            logMessage("🔄 Recalculating with \(manual ? "manual" : "calculated") speed...")
+            sendForLiveParsing(successMessage: "✅ Updated speed mode", silent: false)
+        }
     }
 
     func startCollectingSpeed() {
@@ -333,11 +401,41 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         speedSamples.removeAll()
         averageSpeed = 0.0
         currentSpeed = 0.0
+        manualAverageSpeed = 0.0
+        displayedAverageSpeed = 0.0
+        
+        // ✅ NEW: Cancel any pending timers
+        manualSpeedTimer?.invalidate()
+        autoParseTimer?.invalidate()
+        
         logMessage("🔄 Speed data cleared")
     }
 
     // MARK: - API Communication
+    
     func sendAllOBDData() {
+        sendForLiveParsing(successMessage: "✅ Sent OBD + speed to backend", silent: false)
+    }
+
+    func sendManualSpeedData() {
+        guard useManualSpeed else {
+            logMessage("⚠️ Manual speed mode not enabled")
+            return
+        }
+        sendForLiveParsing(
+            successMessage: "✅ Sent manual speed (\(String(format: "%.1f", manualAverageSpeed)) km/h)",
+            silent: false
+        )
+    }
+    
+    private func sendForLiveParsing(successMessage: String = "🔄 Live parsed", silent: Bool = true) {
+        guard hasAllPIDs else {
+            if !silent {
+                logMessage("⚠️ Cannot send - missing OBD data (RPM: \(lastRPMHex.isEmpty ? "❌" : "✅"), Load: \(lastLoadHex.isEmpty ? "❌" : "✅"), Manifold: \(lastManifoldHex.isEmpty ? "❌" : "✅"))")
+            }
+            return
+        }
+        
         let payload: [String: Any] = [
             "rpm_hex": lastRPMHex,
             "engine_load_hex": lastLoadHex,
@@ -347,35 +445,16 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             "timestamp": ISO8601DateFormatter().string(from: Date())
         ]
         
-        sendDataToBackend(payload: payload, successMessage: "✅ Sent OBD + speed to backend OK")
-    }
-
-    // ✅ NEW FUNCTION FOR MANUAL SPEED
-    func sendManualSpeedData() {
-        guard useManualSpeed else {
-            logMessage("⚠️ Manual speed mode not enabled")
-            return
+        if !silent {
+            logMessage("📤 Sending: Speed=\(String(format: "%.1f", displayedAverageSpeed)) km/h (\(useManualSpeed ? "manual" : "calculated"))")
         }
         
-        let payload: [String: Any] = [
-            "rpm_hex": lastRPMHex,
-            "engine_load_hex": lastLoadHex,
-            "intake_manifold_hex": lastManifoldHex,
-            "speed_kmh": manualAverageSpeed,
-            "speed_source": "manual",
-            "timestamp": ISO8601DateFormatter().string(from: Date())
-        ]
-        
-        sendDataToBackend(
-            payload: payload,
-            successMessage: "✅ Sent manual speed (\(String(format: "%.1f", manualAverageSpeed)) km/h) to backend"
-        )
+        sendDataToBackend(payload: payload, successMessage: successMessage, silent: silent)
     }
 
-    // Shared function to send data to backend
-    private func sendDataToBackend(payload: [String: Any], successMessage: String) {
+    private func sendDataToBackend(payload: [String: Any], successMessage: String, silent: Bool = false) {
         guard let backendURL = backendURL else {
-            logMessage("❌ Backend URL not set")
+            if !silent { logMessage("❌ Backend URL not set") }
             return
         }
 
@@ -386,29 +465,96 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         } catch {
-            logMessage("❌ Failed to encode JSON: \(error)")
+            if !silent { logMessage("❌ Failed to encode JSON: \(error)") }
             return
         }
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                self.logMessage("❌ API Error: \(error.localizedDescription)")
+                if !silent { self.logMessage("❌ API Error: \(error.localizedDescription)") }
                 return
             }
             guard let httpResponse = response as? HTTPURLResponse else {
-                self.logMessage("❌ Invalid response")
+                if !silent { self.logMessage("❌ Invalid response") }
                 return
             }
             
-            self.logMessage(httpResponse.statusCode == 200 ?
-                successMessage :
-                "⚠️ Backend returned status \(httpResponse.statusCode)")
-            
-            if let data = data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                self.logMessage("📥 API Response: \(json)")
+            if httpResponse.statusCode == 200 {
+                if !silent { self.logMessage(successMessage) }
+                
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if !silent { self.logMessage("📥 Backend response: \(json)") }
+                    self.parseBackendResponse(json)
+                }
+            } else {
+                // ✅ IMPROVED: Always log errors, even in silent mode
+                self.logMessage("⚠️ Backend returned status \(httpResponse.statusCode)")
+                if let data = data, let errorMsg = String(data: data, encoding: .utf8) {
+                    self.logMessage("❌ Error details: \(errorMsg)")
+                }
             }
         }.resume()
+    }
+
+    private func parseBackendResponse(_ json: [String: Any]) {
+        // Extract parsed PID data
+        if let parsed = json["parsed"] as? [String: Any] {
+            if let rpm = parsed["rpm"] as? [String: Any],
+               let value = rpm["value"] as? Double {
+                DispatchQueue.main.async {
+                    self.parsedRPM = value
+                    self.logMessage("🏎️ Parsed RPM: \(String(format: "%.0f", value)) rpm")
+                }
+            }
+            
+            if let load = parsed["engine_load"] as? [String: Any],
+               let value = load["value"] as? Double {
+                DispatchQueue.main.async {
+                    self.parsedEngineLoad = value
+                    self.logMessage("📊 Parsed Load: \(String(format: "%.1f", value))%")
+                }
+            }
+            
+            if let manifold = parsed["intake_manifold"] as? [String: Any],
+               let value = manifold["value"] as? Double {
+                DispatchQueue.main.async {
+                    self.parsedManifoldPressure = value
+                    self.logMessage("🌪️ Parsed Pressure: \(String(format: "%.0f", value)) kPa")
+                }
+            }
+        }
+        
+        // Extract emissions data
+        if let emissions = json["emissions"] as? [String: Any] {
+            DispatchQueue.main.async {
+                self.emissions = emissions
+                
+                // Handle fuel_lph (can be String or Double)
+                if let fuelValue = emissions["fuel_lph"] {
+                    if let fuelDouble = fuelValue as? Double {
+                        self.fuelLph = fuelDouble
+                        self.logMessage("⛽ Fuel: \(String(format: "%.2f", fuelDouble)) L/h")
+                    } else if let fuelString = fuelValue as? String,
+                              let fuelDouble = Double(fuelString) {
+                        self.fuelLph = fuelDouble
+                        self.logMessage("⛽ Fuel: \(String(format: "%.2f", fuelDouble)) L/h")
+                    }
+                }
+                
+                // Handle co2_kg_per_hr (can be String or Double)
+                if let co2Value = emissions["co2_kg_per_hr"] {
+                    if let co2Double = co2Value as? Double {
+                        self.co2KgPerHr = co2Double
+                        self.logMessage("🌍 CO₂: \(String(format: "%.2f", co2Double)) kg/hr")
+                    } else if let co2String = co2Value as? String,
+                              let co2Double = Double(co2String) {
+                        self.co2KgPerHr = co2Double
+                        self.logMessage("🌍 CO₂: \(String(format: "%.2f", co2Double)) kg/hr")
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Logging

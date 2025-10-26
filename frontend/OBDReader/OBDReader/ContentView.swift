@@ -5,141 +5,293 @@ struct ContentView: View {
     @State private var showBluetoothAlert = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            // Connection Status
-            Text("OBD-II Connection: \(obdManager.connectionState.rawValue)")
-                .font(.headline)
-                .foregroundColor(statusColor)
-            
-            // Connection Button
-            Button(action: {
-                if obdManager.bluetoothEnabled {
-                    if obdManager.connectionState == .connected {
-                        obdManager.logMessage("⚠️ Disconnect not implemented yet")
+        ScrollView {
+            VStack(spacing: 24) {
+                // Header
+                VStack(spacing: 8) {
+                    Image(systemName: "car.fill")
+                        .font(.system(size: 50))
+                        .foregroundColor(.blue)
+                    
+                    Text("OBD-II Monitor")
+                        .font(.title)
+                        .bold()
+                    
+                    Text(obdManager.connectionState.rawValue)
+                        .font(.subheadline)
+                        .foregroundColor(statusColor)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(statusColor.opacity(0.2))
+                        .cornerRadius(20)
+                }
+                .padding(.top)
+                
+                // Connection Button
+                Button(action: {
+                    if obdManager.bluetoothEnabled {
+                        if obdManager.connectionState != .connected {
+                            obdManager.startConnection()
+                        }
                     } else {
-                        obdManager.startConnection()
+                        showBluetoothAlert = true
                     }
-                } else {
-                    showBluetoothAlert = true
+                }) {
+                    Label(
+                        obdManager.connectionState == .connected ? "Connected" : "Connect to Vehicle",
+                        systemImage: obdManager.connectionState == .connected ? "checkmark.circle.fill" : "bolt.horizontal.circle"
+                    )
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            gradient: Gradient(colors: obdManager.connectionState == .connected ? [.green, .green.opacity(0.8)] : [.blue, .blue.opacity(0.7)]),
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .cornerRadius(12)
+                    .shadow(radius: 4)
                 }
-            }) {
-                Label(
-                    obdManager.connectionState == .connected ? "Connected" : "Connect to OBD-II",
-                    systemImage: obdManager.connectionState == .connected ? "checkmark.circle.fill" : "bolt.horizontal.circle"
-                )
-                .font(.headline)
-                .padding()
-                .frame(maxWidth: .infinity)
-                .background(obdManager.connectionState == .connected ? Color.green : Color.blue)
-                .foregroundColor(.white)
-                .cornerRadius(10)
-            }
-            .disabled(obdManager.connectionState == .scanning || obdManager.connectionState == .connecting)
+                .disabled(obdManager.connectionState == .scanning || obdManager.connectionState == .connecting || obdManager.connectionState == .connected)
+                .padding(.horizontal)
 
-            // Data Display
-            VStack(alignment: .leading, spacing: 5) {
-                Text("RPM Hex: \(obdManager.lastRPMHex)")
-                    .font(.caption)
-                Text("Engine Load Hex: \(obdManager.lastLoadHex)")
-                    .font(.caption)
-                Text("Intake Manifold Hex: \(obdManager.lastManifoldHex)")
-                    .font(.caption)
-                Text("Speed: \(String(format: "%.1f", obdManager.displayedAverageSpeed)) km/h")
-                    .font(.body)
-                    .bold()
-            }
-            .padding()
-            .background(Color.gray.opacity(0.1))
-            .cornerRadius(8)
-
-            // Speed Collection Controls (only show in auto mode)
-            if !obdManager.useManualSpeed {
-                HStack(spacing: 20) {
-                    Button("Start Collecting Speed") {
-                        obdManager.startCollectingSpeed()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(obdManager.connectionState != .connected)
+                // Engine Data Section
+                VStack(spacing: 16) {
+                    Text("Engine Data")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal)
                     
-                    Button("Stop") {
-                        obdManager.stopCollectingSpeed()
+                    HStack(spacing: 16) {
+                        DataCard(
+                            icon: "speedometer",
+                            title: "Engine RPM",
+                            value: obdManager.parsedRPM > 0 ? String(format: "%.0f", obdManager.parsedRPM) : "--",
+                            unit: "RPM",
+                            color: .orange
+                        )
+                        
+                        DataCard(
+                            icon: "gauge.medium",
+                            title: "Engine Load",
+                            value: obdManager.parsedEngineLoad >= 0 ? String(format: "%.1f", obdManager.parsedEngineLoad) : "--",
+                            unit: "%",
+                            color: .purple
+                        )
                     }
-                    .buttonStyle(.bordered)
-                }
-            }
-
-            // Manual Speed Toggle
-            Toggle("Use Manual Speed", isOn: $obdManager.useManualSpeed)
-                .padding()
-                .onChange(of: obdManager.useManualSpeed) { newValue in
-                    obdManager.toggleSpeedMode(manual: newValue)
-                }
-
-            // Manual Speed Input (only show when manual mode is enabled)
-            if obdManager.useManualSpeed {
-                HStack {
-                    Text("Manual Speed:")
-                    TextField("km/h", value: $obdManager.manualAverageSpeed, format: .number)
-                        .keyboardType(.decimalPad)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .frame(width: 100)
                     
-                    if obdManager.manualAverageSpeed > 0 {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
+                    HStack(spacing: 16) {
+                        DataCard(
+                            icon: "wind",
+                            title: "Manifold Pressure",
+                            value: obdManager.parsedManifoldPressure > 0 ? String(format: "%.0f", obdManager.parsedManifoldPressure) : "--",
+                            unit: "kPa",
+                            color: .cyan
+                        )
+                        
+                        DataCard(
+                            icon: "arrow.right",
+                            title: "Speed",
+                            value: String(format: "%.1f", obdManager.displayedAverageSpeed),
+                            unit: "km/h",
+                            color: .green
+                        )
                     }
                 }
-                .padding()
-            }
+                .padding(.horizontal)
 
-            // Data Management - Different buttons for manual vs auto mode
-            if obdManager.useManualSpeed {
-                // Manual Mode Buttons
-                HStack(spacing: 20) {
-                    Button("Send Manual Speed Data") {
-                        obdManager.sendManualSpeedData()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
+                // ✅ FIXED: Emissions & Fuel Section with correct property names
+                VStack(spacing: 16) {
+                    Text("Emissions & Fuel")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal)
                     
-                    Button("Reset Speed Data") {
+                    HStack(spacing: 16) {
+                        DataCard(
+                            icon: "cloud.fill",
+                            title: "CO₂ Rate",
+                            value: obdManager.co2KgPerHr > 0 ? String(format: "%.2f", obdManager.co2KgPerHr) : "--",
+                            unit: "kg/hr",
+                            color: .red
+                        )
+                        
+                        DataCard(
+                            icon: "fuelpump.fill",
+                            title: "Fuel Rate",
+                            value: obdManager.fuelLph > 0 ? String(format: "%.2f", obdManager.fuelLph) : "--",
+                            unit: "L/h",
+                            color: .yellow
+                        )
+                    }
+                    
+                    // CO₂ Summary Card
+                    if obdManager.co2KgPerHr > 0 {
+                        HStack(spacing: 12) {
+                            Image(systemName: "leaf.fill")
+                                .foregroundColor(.green)
+                                .font(.title2)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("CO₂ Emission Rate")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(String(format: "%.2f kg/hr", obdManager.co2KgPerHr))
+                                    .font(.title3)
+                                    .bold()
+                            }
+                            
+                            Spacer()
+                            
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(emissionsRating)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Image(systemName: emissionsIcon)
+                                    .foregroundColor(emissionsColor)
+                                    .font(.title3)
+                            }
+                        }
+                        .padding()
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color.green.opacity(0.1))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+                }
+                .padding(.horizontal)
+
+                // Speed Mode Section
+                VStack(spacing: 16) {
+                    HStack {
+                        Text("Speed Mode")
+                            .font(.headline)
+                        Spacer()
+                        Toggle("", isOn: $obdManager.useManualSpeed)
+                            .labelsHidden()
+                            .onChange(of: obdManager.useManualSpeed) { newValue in
+                                obdManager.toggleSpeedMode(manual: newValue)
+                            }
+                        Text(obdManager.useManualSpeed ? "Manual" : "Auto")
+                            .font(.caption)
+                            .foregroundColor(obdManager.useManualSpeed ? .orange : .blue)
+                    }
+                    .padding()
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(12)
+                    
+                    if !obdManager.useManualSpeed {
+                        HStack(spacing: 12) {
+                            Button(action: {
+                                obdManager.startCollectingSpeed()
+                            }) {
+                                Label("Start", systemImage: "play.fill")
+                                    .font(.subheadline)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(Color.blue)
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                            }
+                            .disabled(obdManager.connectionState != .connected)
+                            
+                            Button(action: {
+                                obdManager.stopCollectingSpeed()
+                            }) {
+                                Label("Stop", systemImage: "stop.fill")
+                                    .font(.subheadline)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(Color.red)
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                            }
+                        }
+                    }
+                    
+                    if obdManager.useManualSpeed {
+                        HStack {
+                            Image(systemName: "hand.point.right.fill")
+                                .foregroundColor(.orange)
+                            Text("Manual Speed:")
+                                .font(.subheadline)
+                            Spacer()
+                            TextField("0", value: $obdManager.manualAverageSpeed, format: .number)
+                                .keyboardType(.decimalPad)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .frame(width: 80)
+                                .onChange(of: obdManager.manualAverageSpeed) { newValue in
+                                    // ✅ Trigger auto-parse when value changes
+                                    obdManager.triggerManualSpeedUpdate(newValue)
+                                }
+                            Text("km/h")
+                                .font(.caption)
+                            
+                            if obdManager.manualAverageSpeed > 0 {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                            }
+                        }
+                        .padding()
+                        .background(Color.orange.opacity(0.1))
+                        .cornerRadius(10)
+                    }
+
+                }
+                .padding(.horizontal)
+
+                // Action Buttons
+                VStack(spacing: 12) {
+                    Button(action: {
+                        if obdManager.useManualSpeed {
+                            obdManager.sendManualSpeedData()
+                        } else {
+                            obdManager.sendAllOBDData()
+                        }
+                    }) {
+                        Label(
+                            "Save to Backend",
+                            systemImage: "arrow.down.doc.fill"
+                        )
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(
+                            LinearGradient(
+                                gradient: Gradient(colors: [.blue, .blue.opacity(0.7)]),
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .cornerRadius(12)
+                        .shadow(radius: 3)
+                    }
+                    
+                    Button(action: {
                         obdManager.resetAverageSpeed()
+                    }) {
+                        Label("Reset Speed Data", systemImage: "arrow.counterclockwise")
+                            .font(.subheadline)
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.red.opacity(0.1))
+                            .cornerRadius(10)
                     }
-                    .buttonStyle(.bordered)
                 }
-            } else {
-                // Auto Mode Buttons
-                HStack(spacing: 20) {
-                    Button("Send Data to Backend") {
-                        obdManager.sendAllOBDData()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    
-                    Button("Reset Speed Data") {
-                        obdManager.resetAverageSpeed()
-                    }
-                    .buttonStyle(.bordered)
-                }
+                .padding(.horizontal)
+                
+                Spacer()
             }
-
-            // Log Display
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(obdManager.log.indices, id: \.self) { idx in
-                        Text(obdManager.log[idx])
-                            .font(.system(size: 10, design: .monospaced))
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-            .frame(maxHeight: 200)
-            .padding()
-            .background(Color.gray.opacity(0.05))
-            .cornerRadius(8)
-
-            Spacer()
         }
-        .padding()
         .alert("Bluetooth Required", isPresented: $showBluetoothAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -147,17 +299,84 @@ struct ContentView: View {
         }
     }
     
-    // Helper computed property for status color
+    // ✅ FIXED: Emissions rating based on kg/hr
+    var emissionsRating: String {
+        let rate = obdManager.co2KgPerHr
+        if rate == 0 { return "N/A" }
+        else if rate < 10 { return "Excellent" }
+        else if rate < 15 { return "Good" }
+        else if rate < 20 { return "Moderate" }
+        else if rate < 30 { return "High" }
+        else { return "Very High" }
+    }
+    
+    var emissionsIcon: String {
+        let rate = obdManager.co2KgPerHr
+        if rate == 0 { return "questionmark.circle" }
+        else if rate < 10 { return "star.fill" }
+        else if rate < 15 { return "checkmark.circle.fill" }
+        else if rate < 20 { return "exclamationmark.circle" }
+        else { return "xmark.circle.fill" }
+    }
+    
+    var emissionsColor: Color {
+        let rate = obdManager.co2KgPerHr
+        if rate == 0 { return .gray }
+        else if rate < 10 { return .green }
+        else if rate < 15 { return .blue }
+        else if rate < 20 { return .orange }
+        else { return .red }
+    }
+    
     var statusColor: Color {
         switch obdManager.connectionState {
-        case .connected:
-            return .green
-        case .failed:
-            return .red
-        case .scanning, .connecting:
-            return .orange
-        default:
-            return .gray
+        case .connected: return .green
+        case .failed: return .red
+        case .scanning, .connecting: return .orange
+        default: return .gray
         }
+    }
+}
+
+// Custom Data Card Component
+struct DataCard: View {
+    let icon: String
+    let title: String
+    let value: String
+    let unit: String
+    let color: Color
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: icon)
+                    .foregroundColor(color)
+                    .font(.title3)
+                Spacer()
+            }
+            
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(value)
+                    .font(.title2)
+                    .bold()
+                Text(unit)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(color.opacity(0.1))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(color.opacity(0.3), lineWidth: 1)
+        )
     }
 }
