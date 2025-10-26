@@ -110,6 +110,41 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
                     
+                    // Titles row with emissions rating next to each title
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading) {
+                            HStack(spacing: 8) {
+                                Text("CO₂ Rate")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                HStack(spacing: 6) {
+                                    Text(emissionsRating)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                    Image(systemName: emissionsIcon)
+                                        .foregroundColor(emissionsColor)
+                                }
+                            }
+                        }
+
+                        VStack(alignment: .leading) {
+                            HStack(spacing: 8) {
+                                Text("Fuel Rate")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                HStack(spacing: 6) {
+                                    Text(emissionsRating)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                    Image(systemName: emissionsIcon)
+                                        .foregroundColor(emissionsColor)
+                                }
+                            }
+                        }
+                    }
+
                     HStack(spacing: 16) {
                         DataCard(
                             icon: "cloud.fill",
@@ -118,51 +153,13 @@ struct ContentView: View {
                             unit: "kg/hr",
                             color: .red
                         )
-                        
+
                         DataCard(
                             icon: "fuelpump.fill",
                             title: "Fuel Rate",
                             value: obdManager.fuelLph > 0 ? String(format: "%.2f", obdManager.fuelLph) : "--",
                             unit: "L/h",
                             color: .yellow
-                        )
-                    }
-                    
-                    // CO₂ Summary Card
-                    if obdManager.co2KgPerHr > 0 {
-                        HStack(spacing: 12) {
-                            Image(systemName: "leaf.fill")
-                                .foregroundColor(.green)
-                                .font(.title2)
-                            
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("CO₂ Emission Rate")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text(String(format: "%.2f kg/hr", obdManager.co2KgPerHr))
-                                    .font(.title3)
-                                    .bold()
-                            }
-                            
-                            Spacer()
-                            
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text(emissionsRating)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Image(systemName: emissionsIcon)
-                                    .foregroundColor(emissionsColor)
-                                    .font(.title3)
-                            }
-                        }
-                        .padding()
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(Color.green.opacity(0.1))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.green.opacity(0.3), lineWidth: 1)
                         )
                     }
                 }
@@ -188,32 +185,22 @@ struct ContentView: View {
                     .cornerRadius(12)
                     
                     if !obdManager.useManualSpeed {
-                        HStack(spacing: 12) {
-                            Button(action: {
-                                obdManager.startCollectingSpeed()
-                            }) {
-                                Label("Start", systemImage: "play.fill")
-                                    .font(.subheadline)
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.blue)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
-                            }
-                            .disabled(obdManager.connectionState != .connected)
-                            
-                            Button(action: {
+                        Button(action: {
+                            if obdManager.isCollectingData {
                                 obdManager.stopCollectingSpeed()
-                            }) {
-                                Label("Stop", systemImage: "stop.fill")
-                                    .font(.subheadline)
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.red)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
+                            } else {
+                                obdManager.startCollectingSpeed()
                             }
+                        }) {
+                            Label(obdManager.isCollectingData ? "Stop" : "Start", systemImage: obdManager.isCollectingData ? "stop.fill" : "play.fill")
+                                .font(.subheadline)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(obdManager.isCollectingData ? Color.red : Color.blue)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
                         }
+                        .disabled(obdManager.connectionState != .connected)
                     }
                     
                     if obdManager.useManualSpeed {
@@ -249,32 +236,6 @@ struct ContentView: View {
 
                 // Action Buttons
                 VStack(spacing: 12) {
-                    Button(action: {
-                        if obdManager.useManualSpeed {
-                            obdManager.sendManualSpeedData()
-                        } else {
-                            obdManager.sendAllOBDData()
-                        }
-                    }) {
-                        Label(
-                            "Save to Backend",
-                            systemImage: "arrow.down.doc.fill"
-                        )
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(
-                            LinearGradient(
-                                gradient: Gradient(colors: [.blue, .blue.opacity(0.7)]),
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .cornerRadius(12)
-                        .shadow(radius: 3)
-                    }
-                    
                     Button(action: {
                         obdManager.resetAverageSpeed()
                     }) {
