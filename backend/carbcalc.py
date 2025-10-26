@@ -2,7 +2,6 @@ AFR=14.7
 FUEL_DENSITY=750  # in kg/m³
 def calculate_from_maf(maf_gs: float):
     """Estimate CO₂ emissions using MAF (grams/second)"""
-    fuel_density = 750
     fuel_gs = maf_gs / AFR
     fuel_lph = (fuel_gs / FUEL_DENSITY) * 3600
     co2_kgph = fuel_lph * 2.31
