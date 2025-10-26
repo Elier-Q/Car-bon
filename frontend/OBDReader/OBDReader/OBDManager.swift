@@ -17,6 +17,18 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var log: [String] = []
     @Published var connectionState: ConnectionState = .idle
     @Published var bluetoothEnabled: Bool = false
+    
+    // Speed tracking properties
+    var speedSamples: [Double] = []
+    private var maxSpeedSamples = 60  // Keep last 60 samples
+    @Published var averageSpeed: Double = 0.0
+    @Published var currentSpeed: Double = 0.0
+    @Published var isCollectingData: Bool = false
+    
+    // Manual speed input
+    @Published var useManualSpeed: Bool = false
+    @Published var manualAverageSpeed: Double = 0.0
+    @Published var displayedAverageSpeed: Double = 0.0
 
     enum ConnectionState: String {
         case idle = "Idle"
@@ -146,7 +158,7 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         enqueueCommands([
             "ATZ", "ATE0", "ATL0", "ATS1", "ATH1",
             "ATSP7",
-            "0100"   // Check supported PIDs first
+            "0100"
         ])
     }
 
@@ -219,7 +231,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             if contains4100(tokens) {
                 logMessage("✅ 0100 succeeded - Requesting data PIDs...")
                 advanceCommandQueueAfterPrompt()
-                // Request multiple PIDs
                 enqueueCommands(["0104", "010B", "010C", "010D"])
                 continue
             }
@@ -249,15 +260,43 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
 
             // Check for Vehicle Speed (010D)
-            // Check for Vehicle Speed (010D)
             if let data = extractPID(from: tokens, mode: "41", pid: "0D") {
                 let raw = data.joined(separator: " ")
-                logMessage("🚗 Vehicle Speed: \(raw)")
+                
+                // Parse speed from hex
+                if data.count >= 3, let speedHex = Int(data[2], radix: 16) {
+                    let speed = Double(speedHex)
+                    currentSpeed = speed
+                    
+                    // Add sample
+                    speedSamples.append(speed)
+                    if speedSamples.count > maxSpeedSamples {
+                        speedSamples.removeFirst()
+                    }
+                    
+                    // Calculate average
+                    if !speedSamples.isEmpty {
+                        averageSpeed = speedSamples.reduce(0, +) / Double(speedSamples.count)
+                    }
+                    
+                    updateDisplayedAverage()
+                    
+                    logMessage("🚗 Speed: \(String(format: "%.1f", speed)) km/h | Avg: \(String(format: "%.1f", displayedAverageSpeed)) km/h (\(speedSamples.count) samples)")
+                } else {
+                    logMessage("🚗 Vehicle Speed: \(raw)")
+                }
+                
                 advanceCommandQueueAfterPrompt()
-                // ❌ Removed the auto-loop for now
+                
+                // Request again if collecting data
+                if isCollectingData {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.enqueueCommands(["010D"])
+                    }
+                }
+                
                 continue
             }
-
 
             advanceCommandQueueAfterPrompt()
         }
@@ -278,7 +317,6 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         let pidUpper = pid.uppercased()
         let modeUpper = mode.uppercased()
         
-        // Different PIDs return different byte lengths
         let byteLengths: [String: Int] = [
             "04": 3,  // Engine Load: 41 04 XX (1 data byte)
             "0B": 3,  // MAP: 41 0B XX (1 data byte)
@@ -305,8 +343,46 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             .split(whereSeparator: { $0.isWhitespace })
             .map { String($0).uppercased() }
     }
+    
+    // MARK: - Speed Management
+    private func updateDisplayedAverage() {
+        displayedAverageSpeed = useManualSpeed ? manualAverageSpeed : averageSpeed
+    }
+    
+    func setManualAverageSpeed(_ speed: Double) {
+        manualAverageSpeed = speed
+        useManualSpeed = true
+        updateDisplayedAverage()
+        logMessage("✏️ Manual average speed set to \(String(format: "%.1f", speed)) km/h")
+    }
+    
+    func toggleSpeedMode(manual: Bool) {
+        useManualSpeed = manual
+        updateDisplayedAverage()
+        logMessage(manual ? "📝 Using manual speed input" : "📊 Using calculated speed")
+    }
+    
+    func startCollectingSpeed() {
+        isCollectingData = true
+        speedSamples.removeAll()
+        averageSpeed = 0.0
+        logMessage("▶️ Started collecting speed samples")
+        enqueueCommands(["010D"])
+    }
+    
+    func stopCollectingSpeed() {
+        isCollectingData = false
+        logMessage("⏸️ Stopped collecting (collected \(speedSamples.count) samples)")
+    }
+    
+    func resetAverageSpeed() {
+        speedSamples.removeAll()
+        averageSpeed = 0.0
+        currentSpeed = 0.0
+        logMessage("🔄 Speed data cleared")
+    }
 
-    // MARK: - API Communication (not used yet)
+    // MARK: - API Communication
     private func sendOBDDataToAPI(hexData: String) {
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
@@ -314,6 +390,8 @@ class OBDManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
         let payload: [String: Any] = [
             "hex_data": hexData,
+            "average_speed_kmh": displayedAverageSpeed,
+            "speed_source": useManualSpeed ? "manual" : "calculated",
             "timestamp": ISO8601DateFormatter().string(from: Date())
         ]
 
