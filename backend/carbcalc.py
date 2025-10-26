@@ -1,9 +1,10 @@
+AFR=14.7
+FUEL_DENSITY=750  # in kg/m³
 def calculate_from_maf(maf_gs: float):
     """Estimate CO₂ emissions using MAF (grams/second)"""
-    afr = 14.7
     fuel_density = 750
-    fuel_gs = maf_gs / afr
-    fuel_lph = (fuel_gs / fuel_density) * 3600
+    fuel_gs = maf_gs / AFR
+    fuel_lph = (fuel_gs / FUEL_DENSITY) * 3600
     co2_kgph = fuel_lph * 2.31
     return {"co2_kg_per_hr": co2_kgph, "fuel_lph": fuel_lph}
 
@@ -24,9 +25,6 @@ def calculate_from_speed_rpm_load(
     """
     Speed-Density method: Calculate fuel consumption from RPM, Load, and engine parameters.
     """
-    AFR = 14.7
-    FUEL_DENSITY = 750
-    
     load_decimal = load_pct / 100.0
     
     # Calculate MAF (Mass Air Flow) in g/s
